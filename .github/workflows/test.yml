@@ -1,0 +1,34 @@
+name: Test OIDC to AWS S3 (GitHub.com)
+
+on:
+  workflow_dispatch:   # run manually
+
+env:
+  AWS_REGION: ap-southeast-1
+  BUCKET_NAME: my-ci-artifacts
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # REQUIRED for OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-southeast-1
+          role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
+
+      - name: Who am I (STS)
+        run: aws sts get-caller-identity
+
+      - name: Upload test file to S3
+        run: |
+          echo "Hello from GitHub.com OIDC at $(date -u)" > test.txt
+          aws s3 cp test.txt s3://dxc-cicd-artifacts-bucket/dev/test-connection.txt
+
+      - name: List uploaded object
+        run: aws s3 ls s3://dxc-cicd-artifacts-bucket/public-gh-test/

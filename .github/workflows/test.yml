@@ -1,11 +1,7 @@
 name: Test OIDC to AWS S3 (GitHub.com)
 
 on:
-  workflow_dispatch:   # run manually
-
-env:
-  AWS_REGION: ap-southeast-1
-  BUCKET_NAME: my-ci-artifacts
+  workflow_dispatch: # run manually
 
 jobs:
   test:
@@ -27,8 +23,8 @@ jobs:
 
       - name: Upload test file to S3
         run: |
-          echo "Hello from GitHub.com OIDC at $(date -u)" > test.txt
+          echo "Hello from GitHub OIDC at $(date -u)" > test.txt
           aws s3 cp test.txt s3://dxc-cicd-artifacts-bucket/dev/test-connection.txt
 
       - name: List uploaded object
-        run: aws s3 ls s3://dxc-cicd-artifacts-bucket/public-gh-test/
+        run: aws s3 ls s3://dxc-cicd-artifacts-bucket/dev/

@@ -7,10 +7,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # REQUIRED for OIDC
+      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show context
+        run: |
+          echo "REF=${{ github.ref }}"
+          echo "REPO=${{ github.repository }}"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

@@ -1,21 +1,16 @@
-name: Test OIDC to AWS S3 (GitHub.com)
+name: Test OIDC to AWS S3 and RDS
 
 on:
   workflow_dispatch: # run manually
 
 jobs:
-  test:
+  test-s3:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Show context
-        run: |
-          echo "REF=${{ github.ref }}"
-          echo "REPO=${{ github.repository }}"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -33,3 +28,18 @@ jobs:
 
       - name: List uploaded object
         run: aws s3 ls s3://dxc-cicd-artifacts-bucket/dev/
+
+  test-rds:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Test RDS connection
+        run: |
+          PGPASSWORD=cicddemo12345 \
+          psql -h cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com \
+               -U postgres \
+               -d postgres \
+               -p 5432 \
+               -c "SELECT now();"

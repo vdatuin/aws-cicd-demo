@@ -1,5 +1,5 @@
 [run]
-source = src/dq_utils
+source = src
 branch = True
 
 [report]

@@ -1,0 +1,9 @@
+[run]
+source = src/dq_utils
+branch = True
+
+[report]
+omit =
+    tests/*
+    */__init__.py
+show_missing = True

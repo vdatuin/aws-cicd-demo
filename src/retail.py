@@ -1,96 +1,55 @@
-"""
-Retail Data Quality Check Script.
-
-This script:
-  - Generates a sample retail DataFrame.
-  - Runs uniqueness and null-check validations using dq_utils functions.
-  - Saves the results to CSV and JSON files inside an output folder.
-"""
-
+# src/retail.py
 from pathlib import Path
 import json
-
 import pandas as pd
-
-from dq_utils import check_nulls, check_unique_rows
-
+from dq_utils import check_unique_rows, check_nulls
+from typing import Optional
 
 def sample_retail_df() -> pd.DataFrame:
+    return pd.DataFrame({
+        "customer": ["Alice","Bob","Alice","Bob","Charlie","Alice"],
+        "product":  ["Apples","Apples","Bananas","Bananas","Apples","Bananas"],
+        "quantity": [3,2,5,7,1,2],
+        "price":    [2.0,2.0,1.5,1.5,2.0,1.5],
+    })
+
+
+def run_demo(df: Optional[pd.DataFrame] = None, output_dir: str = "run_outputs") -> dict:
     """
-    Create a sample retail DataFrame for demo/testing.
-
-    Returns:
-        pd.DataFrame: A DataFrame with columns
-        [customer, product, quantity, price].
+    Runs the demo: checks uniqueness & nulls, prints concise output, writes artifacts.
+    Returns a dict with results so tests can assert on it.
     """
-    return pd.DataFrame(
-        {
-            "customer": ["Alice", "Bob", "Alice", "Bob", "Charlie", "Alice"],
-            "product": ["Apples", "Apples", "Bananas", "Bananas", "Apples",
-                        "Bananas"],
-            "quantity": [3, 2, 5, 7, 1, 2],
-            "price": [2.0, 2.0, 1.5, 1.5, 2.0, 1.5],
-        }
-    )
+    if df is None:
+        df = sample_retail_df()
 
-
-if __name__ == "__main__":
-    # Create a DataFrame (sample data)
-    df = sample_retail_df()
-
-    # Run uniqueness check across selected columns
-    uniq = check_unique_rows(
-        df,
-        subset=["customer", "product", "quantity", "price"],
-    )
-
-    # Run nulls check (fail if any nulls exist)
+    uniq = check_unique_rows(df, subset=["customer","product","quantity","price"])
     nulls = check_nulls(df, fail_if_any=True)
 
-    # Print uniqueness results
+    # Print (kept for human debugging; tests don’t rely on stdout)
     print("== Uniqueness ==")
-    print(
-        f"is_unique: {uniq['is_unique']}, "
-        f"duplicate_count: {uniq['duplicate_count']}"
-    )
+    print(f"is_unique: {uniq['is_unique']}, duplicate_count: {uniq['duplicate_count']}")
     if not uniq["is_unique"]:
         print(uniq["duplicate_rows"])
 
-    # Print null-check results
     print("\n== Nulls ==")
     print(f"passed: {nulls['passed']}")
     print("null_counts:\n", nulls["null_counts"])
     print("null_ratios:\n", nulls["null_ratios"])
 
-    # Prepare output folder
-    out = Path("run_outputs")
-    out.mkdir(parents=True, exist_ok=True)
-
-    # Save DataFrame to CSV
+    # Save artifacts
+    out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     df.to_csv(out / "retail_table.csv", index=False)
+    (out / "uniqueness.json").write_text(json.dumps({
+        "is_unique": uniq["is_unique"],
+        "duplicate_count": uniq["duplicate_count"],
+    }, indent=2))
+    (out / "nulls.json").write_text(json.dumps({
+        "passed": nulls["passed"],
+        "null_counts": nulls["null_counts"].to_dict(),
+        "null_ratios": {k: float(v) for k, v in nulls["null_ratios"].to_dict().items()},
+    }, indent=2))
 
-    # Save uniqueness results to JSON
-    (out / "uniqueness.json").write_text(
-        json.dumps(
-            {
-                "is_unique": uniq["is_unique"],
-                "duplicate_count": uniq["duplicate_count"],
-            },
-            indent=2,
-        )
-    )
+    return {"uniq": uniq, "nulls": nulls, "output_dir": str(out)}
 
-    # Save null-check results to JSON
-    (out / "nulls.json").write_text(
-        json.dumps(
-            {
-                "passed": nulls["passed"],
-                "null_counts": nulls["null_counts"].to_dict(),
-                "null_ratios": {
-                    k: float(v)
-                    for k, v in nulls["null_ratios"].to_dict().items()
-                },
-            },
-            indent=2,
-        )
-    )
+if __name__ == "__main__":
+    run_demo()

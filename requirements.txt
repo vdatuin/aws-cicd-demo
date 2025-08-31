@@ -1,0 +1,7 @@
+# dev/build/test tooling
+pandas
+pytest
+pytest-cov
+build
+flake8
+

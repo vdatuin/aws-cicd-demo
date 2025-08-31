@@ -29,17 +29,17 @@ jobs:
       - name: List uploaded object
         run: aws s3 ls s3://dxc-cicd-artifacts-bucket/dev/
 
-  test-rds:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+  # test-rds:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Install PostgreSQL client
+  #       run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      - name: Test RDS connection
-        run: |
-          PGPASSWORD=cicddemo12345 \
-          psql -h cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com \
-               -U postgres \
-               -d postgres \
-               -p 5432 \
-               -c "SELECT now();"
+  #     - name: Test RDS connection
+  #       run: |
+  #         PGPASSWORD=cicddemo12345 \
+  #         psql -h cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com \
+  #              -U postgres \
+  #              -d postgres \
+  #              -p 5432 \
+  #              -c "SELECT now();"

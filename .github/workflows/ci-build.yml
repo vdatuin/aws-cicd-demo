@@ -1,0 +1,60 @@
+name: CI (dq-utils) for PRs feature/* -> develop
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [ develop ]
+
+jobs:
+  build_lint_test_coverage:
+    if: startsWith(github.head_ref, 'feature/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          flake8 src tests --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src tests --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+
+      - name: Build wheel
+        run: python -m build
+
+      - name: Install built wheel
+        run: pip install dist/*.whl
+
+      - name: Run demo (prints & saves outputs)
+        run: python src/retail.py
+
+      - name: Pytest with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          pytest -q --cov=src --cov-report=term-missing --cov-report=xml
+        # term-missing shows uncovered lines in CI logs; xml is useful for badges or quality tools
+
+      - name: Upload outputs (CSV/JSON)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dq-results
+          path: run_outputs/
+          if-no-files-found: error
+
+      - name: Upload coverage.xml
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error

@@ -1,0 +1,113 @@
+name: CD to S3 (develop → dev, main/prod-* → prod)
+
+on:
+  push:
+    branches: [ develop, main ]
+    tags:
+      - 'prod-*'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ap-southeast-1
+  BUCKET_NAME: dxc-cicd-artifacts-bucket
+
+jobs:
+  build_test_package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # required for OIDC
+    outputs:
+      envname: ${{ steps.set-env.outputs.envname }}
+      build_id: ${{ steps.set-env.outputs.build_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine environment (dev/prod)
+        id: set-env
+        run: |
+          if [[ "${GITHUB_REF}" == refs/heads/develop ]]; then
+            echo "envname=dev" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == refs/heads/main || "${GITHUB_REF}" == refs/tags/prod-* ]]; then
+            echo "envname=prod" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported ref: ${GITHUB_REF}"; exit 1
+          fi
+          echo "build_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          flake8 src tests --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src tests --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+
+      - name: Build wheel (and sdist)
+        run: python -m build
+
+      - name: Install built wheel
+        run: pip install dist/*.whl
+
+      - name: Run demo (prints & saves outputs)
+        run: python src/retail.py
+
+      - name: Pytest with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          pytest -q --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: Upload local artifacts (for run record)
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-build-artifacts
+          path: |
+            dist/*.whl
+            run_outputs/**
+            coverage.xml
+
+  deploy_to_s3:
+    needs: build_test_package
+    runs-on: ubuntu-latest
+    # gate prod with a protected GitHub Environment (optional but recommended)
+    environment: ${{ needs.build_test_package.outputs.envname }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts from previous job
+        uses: actions/download-artifact@v4
+        with:
+          name: local-build-artifacts
+          path: out
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
+
+      - name: Compute S3 prefix (env/build-id)
+        id: prefix
+        run: |
+          echo "prefix=${{ needs.build_test_package.outputs.envname }}/${{ needs.build_test_package.outputs.build_id }}" >> $GITHUB_OUTPUT
+
+      - name: Upload wheel(s) to S3
+        run: aws s3 cp out/dist/ s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/ --recursive --exclude "*" --include "*.whl"
+
+      - name: Upload run outputs (CSV/JSON/TXT)
+        run: aws s3 cp out/run_outputs/ s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/run_outputs/ --recursive
+
+      - name: Upload coverage report
+        run: aws s3 cp out/coverage.xml s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/

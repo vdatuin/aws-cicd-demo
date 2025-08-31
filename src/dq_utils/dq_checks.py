@@ -1,8 +1,14 @@
 from __future__ import annotations
-import pandas as pd
-from typing import Iterable, Optional, Dict, Any
 
-def check_unique_rows(df: pd.DataFrame, subset: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+from typing import Any, Dict, Iterable, Optional
+
+import pandas as pd
+
+
+def check_unique_rows(
+    df: pd.DataFrame,
+    subset: Optional[Iterable[str]] = None
+) -> Dict[str, Any]:
     """
     Validate that rows are unique across the whole DataFrame or a column subset.
 
@@ -18,10 +24,13 @@ def check_unique_rows(df: pd.DataFrame, subset: Optional[Iterable[str]] = None) 
     duplicate_rows = df[dups_mask].copy()
     return {
         "is_unique": duplicate_rows.empty,
-        "duplicate_count": 0 if duplicate_rows.empty else int(duplicate_rows.shape[0]),
+        "duplicate_count": (
+            0 if duplicate_rows.empty else int(duplicate_rows.shape[0])
+        ),
         "duplicate_rows": duplicate_rows,
         "subset": subset_cols,
     }
+
 
 def check_nulls(
     df: pd.DataFrame,
@@ -54,8 +63,8 @@ def check_nulls(
     if fail_if_any and null_counts.sum() > 0:
         passed = False
     if thresholds:
-        for c, max_ratio in thresholds.items():
-            if c in null_ratios and null_ratios[c] > max_ratio:
+        for col, max_ratio in thresholds.items():
+            if col in null_ratios and null_ratios[col] > max_ratio:
                 passed = False
 
     return {

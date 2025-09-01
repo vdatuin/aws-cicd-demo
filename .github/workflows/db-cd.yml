@@ -1,0 +1,81 @@
+name: DB CD to AWS RDS (Liquibase)
+
+on:
+  push:
+    branches: [ develop, main ]
+    tags: ['prod-*']
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve environment
+        id: env
+        run: |
+          ref="${GITHUB_REF}"
+          if [[ "$ref" == "refs/heads/develop" ]]; then
+            echo "name=dev" >> $GITHUB_OUTPUT
+            echo "secret_id=rds/appdb/dev" >> $GITHUB_OUTPUT
+          elif [[ "$ref" == "refs/heads/main" || "$ref" == refs/tags/prod-* ]]; then
+            echo "name=prod" >> $GITHUB_OUTPUT
+            echo "secret_id=rds/appdb/prod" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported ref: $ref"
+            exit 1
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/GitHubActions-${{ steps.env.outputs.name }}-Role
+
+      - name: Fetch DB secret
+        id: db
+        run: |
+          aws secretsmanager get-secret-value --secret-id "${{ steps.env.outputs.secret_id }}" \
+            --query SecretString --output text > secret.json
+          sudo apt-get update && sudo apt-get install -y jq postgresql-client
+          echo "host=$(jq -r .host secret.json)" >> $GITHUB_OUTPUT
+          echo "port=$(jq -r .port secret.json)" >> $GITHUB_OUTPUT
+          echo "dbname=$(jq -r .dbname secret.json)" >> $GITHUB_OUTPUT
+          echo "username=$(jq -r .username secret.json)" >> $GITHUB_OUTPUT
+          echo "password=$(jq -r .password secret.json)" >> $GITHUB_OUTPUT
+
+      - name: Ensure database exists (optional; requires privileges)
+        env:
+          PGPASSWORD: ${{ steps.db.outputs.password }}
+        run: |
+          psql "postgresql://${{ steps.db.outputs.username }}:${{ steps.db.outputs.password }}@${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/postgres" \
+            -tc "SELECT 1 FROM pg_database WHERE datname='${{ steps.db.outputs.dbname }}'" | grep -q 1 \
+            || createdb -h ${{ steps.db.outputs.host }} -p ${{ steps.db.outputs.port }} -U ${{ steps.db.outputs.username }} ${{ steps.db.outputs.dbname }}
+
+      - name: Liquibase update on RDS
+        uses: liquibase/liquibase-github-action@v4.29.2
+        with:
+          operation: 'update'
+          classpath: 'db'
+          changeLogFile: 'db/changelog/master.yaml'
+          username: ${{ steps.db.outputs.username }}
+          password: ${{ steps.db.outputs.password }}
+          url: jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}
+
+      - name: Post-deploy SQL (optional if present)
+        env:
+          PGPASSWORD: ${{ steps.db.outputs.password }}
+        run: |
+          if [ -f db/post_deploy/seed_minimal_data.sql ]; then
+            psql \
+              -h ${{ steps.db.outputs.host }} -p ${{ steps.db.outputs.port }} \
+              -U ${{ steps.db.outputs.username }} -d ${{ steps.db.outputs.dbname }} \
+              -v ON_ERROR_STOP=1 -f db/post_deploy/seed_minimal_data.sql
+          fi

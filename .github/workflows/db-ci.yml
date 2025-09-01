@@ -39,6 +39,13 @@ jobs:
           psql -h localhost -p 5432 -U postgres -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='appdb'" | grep -q 1 \
             || createdb -h localhost -p 5432 -U postgres appdb
 
+      - name: Ensure app_readonly role exists
+        env:
+          PGPASSWORD: password
+        run: |
+          psql -h localhost -p 5432 -U postgres -d appdb -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
+            || psql -h localhost -p 5432 -U postgres -d appdb -c "CREATE ROLE app_readonly;"
+
       - name: Setup Liquibase
         uses: liquibase/setup-liquibase@v1
         with:
@@ -83,7 +90,6 @@ jobs:
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT COUNT(*) AS products FROM products;" || true
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT * FROM vw_product_sales LIMIT 5;" || true
 
-      # Optional: prove at least one changeset can roll back safely, then re-apply
       - name: Liquibase rollback-count 1 (smoke)
         if: ${{ always() }}
         run: |

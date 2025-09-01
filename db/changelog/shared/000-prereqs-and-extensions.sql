@@ -1,0 +1,3 @@
+--changeset vdatuin:prereqs
+-- Optional: enable extensions or set search_path, etc.
+-- CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

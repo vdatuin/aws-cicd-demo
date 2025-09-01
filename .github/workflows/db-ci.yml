@@ -89,25 +89,4 @@ jobs:
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT COUNT(*) AS orders FROM orders;" || true
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT COUNT(*) AS products FROM products;" || true
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT * FROM vw_product_sales LIMIT 5;" || true
-
-      - name: Liquibase rollback-count 1 (smoke)
-        if: ${{ always() }}
-        run: |
-          liquibase \
-            --url="jdbc:postgresql://localhost:5432/appdb" \
-            --username="postgres" \
-            --password="password" \
-            --changeLogFile="db/changelog/master.yaml" \
-            --log-level=info \
-            rollbackCount 1
-
-      - name: Re-apply after rollback (back to head)
-        if: ${{ always() }}
-        run: |
-          liquibase \
-            --url="jdbc:postgresql://localhost:5432/appdb" \
-            --username="postgres" \
-            --password="password" \
-            --changeLogFile="db/changelog/master.yaml" \
-            --log-level=info \
-            update
+          

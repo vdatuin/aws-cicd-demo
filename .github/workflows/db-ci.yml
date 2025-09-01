@@ -3,7 +3,7 @@ name: DB CI (Liquibase on Docker Postgres)
 on:
   pull_request:
     branches: [ develop ]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [ opened, synchronize, reopened, ready_for_review ]
   workflow_dispatch:
 
 jobs:
@@ -39,63 +39,69 @@ jobs:
           psql -h localhost -p 5432 -U postgres -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='appdb'" | grep -q 1 \
             || createdb -h localhost -p 5432 -U postgres appdb
 
-      - name: Liquibase validate
-        uses: liquibase/liquibase-github-action@v4.29.2
+      - name: Setup Liquibase
+        uses: liquibase/setup-liquibase@v1
         with:
-          operation: 'validate'
-          classpath: 'db'
-          changeLogFile: 'db/changelog/master.yaml'
-          username: 'postgres'
-          password: 'password'
-          url: 'jdbc:postgresql://localhost:5432/appdb'
+          version: '4.32.0'
+          edition: 'oss'
+
+      - name: Liquibase validate
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://localhost:5432/appdb" \
+            --username="postgres" \
+            --password="password" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            validate
 
       - name: Liquibase update (apply all changes)
-        uses: liquibase/liquibase-github-action@v4.29.2
-        with:
-          operation: 'update'
-          classpath: 'db'
-          changeLogFile: 'db/changelog/master.yaml'
-          username: 'postgres'
-          password: 'password'
-          url: 'jdbc:postgresql://localhost:5432/appdb'
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://localhost:5432/appdb" \
+            --username="postgres" \
+            --password="password" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update
 
       - name: Post-deploy SQL (optional if present)
         env:
           PGPASSWORD: password
         run: |
-          if [ -f db/post_deploy/seed_minimal_data.sql ]; then
-            psql -h localhost -p 5432 -U postgres -d appdb -v ON_ERROR_STOP=1 -f db/post_deploy/seed_minimal_data.sql
+          if [ -f db/post_deploy/insert_minimal_data.sql ]; then
+            psql -h localhost -p 5432 -U postgres -d appdb -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
           fi
 
       - name: Smoke checks
         env:
           PGPASSWORD: password
         run: |
+          set -e
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT COUNT(*) AS customers FROM customers;" || true
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT COUNT(*) AS orders FROM orders;" || true
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT COUNT(*) AS products FROM products;" || true
           psql -h localhost -p 5432 -U postgres -d appdb -c "SELECT * FROM vw_product_sales LIMIT 5;" || true
 
-      # --- Optional rollback smoke: prove we can revert the last changeset safely ---
+      # Optional: prove at least one changeset can roll back safely, then re-apply
       - name: Liquibase rollback-count 1 (smoke)
-        if: ${{ always() }}   # run even if smoke checks failed, for visibility
-        uses: liquibase/liquibase-github-action@v4.29.2
-        with:
-          operation: 'rollbackCount'
-          liquibaseCommandValue: '1'
-          classpath: 'db'
-          changeLogFile: 'db/changelog/master.yaml'
-          username: 'postgres'
-          password: 'password'
-          url: 'jdbc:postgresql://localhost:5432/appdb'
+        if: ${{ always() }}
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://localhost:5432/appdb" \
+            --username="postgres" \
+            --password="password" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            rollbackCount 1
 
       - name: Re-apply after rollback (back to head)
         if: ${{ always() }}
-        uses: liquibase/liquibase-github-action@v4.29.2
-        with:
-          operation: 'update'
-          classpath: 'db'
-          changeLogFile: 'db/changelog/master.yaml'
-          username: 'postgres'
-          password: 'password'
-          url: 'jdbc:postgresql://localhost:5432/appdb'
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://localhost:5432/appdb" \
+            --username="postgres" \
+            --password="password" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update

@@ -51,7 +51,14 @@ jobs:
           echo "username=$(jq -r .username secret.json)" >> $GITHUB_OUTPUT
           echo "password=$(jq -r .password secret.json)" >> $GITHUB_OUTPUT
 
-      - name: Ensure database exists (optional; requires privileges)
+      - name: Setup Liquibase
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: '4.32.0'
+          edition: 'oss'
+
+      # Optional: ensure database exists (requires perms; keep or remove)
+      - name: Ensure database exists
         env:
           PGPASSWORD: ${{ steps.db.outputs.password }}
         run: |
@@ -59,23 +66,33 @@ jobs:
             -tc "SELECT 1 FROM pg_database WHERE datname='${{ steps.db.outputs.dbname }}'" | grep -q 1 \
             || createdb -h ${{ steps.db.outputs.host }} -p ${{ steps.db.outputs.port }} -U ${{ steps.db.outputs.username }} ${{ steps.db.outputs.dbname }}
 
+      - name: Liquibase validate
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}" \
+            --username="${{ steps.db.outputs.username }}" \
+            --password="${{ steps.db.outputs.password }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            validate
+
       - name: Liquibase update on RDS
-        uses: liquibase/liquibase-github-action@v4.29.2
-        with:
-          operation: 'update'
-          classpath: 'db'
-          changeLogFile: 'db/changelog/master.yaml'
-          username: ${{ steps.db.outputs.username }}
-          password: ${{ steps.db.outputs.password }}
-          url: jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}" \
+            --username="${{ steps.db.outputs.username }}" \
+            --password="${{ steps.db.outputs.password }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update
 
       - name: Post-deploy SQL (optional if present)
         env:
           PGPASSWORD: ${{ steps.db.outputs.password }}
         run: |
-          if [ -f db/post_deploy/seed_minimal_data.sql ]; then
+          if [ -f db/post_deploy/insert_minimal_data.sql ]; then
             psql \
               -h ${{ steps.db.outputs.host }} -p ${{ steps.db.outputs.port }} \
               -U ${{ steps.db.outputs.username }} -d ${{ steps.db.outputs.dbname }} \
-              -v ON_ERROR_STOP=1 -f db/post_deploy/seed_minimal_data.sql
+              -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
           fi

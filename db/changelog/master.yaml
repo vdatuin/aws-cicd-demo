@@ -1,0 +1,20 @@
+databaseChangeLog:
+  - include: { file: shared/000-prereqs-and-extensions.sql, relativeToChangelogFile: true }
+
+  # Base tables first (customers, orders, products, etc.)
+  - include: { file: customer/001-init-customer.sql,        relativeToChangelogFile: true }
+  - include: { file: orders/001-init-orders.sql,            relativeToChangelogFile: true }
+  - include: { file: orders/002-add-order-status.sql,       relativeToChangelogFile: true }
+  - include: { file: orders/003-idx-orders-customer-date.sql, relativeToChangelogFile: true }
+
+  # Products (create + inserts + FK to orders)
+  - include: { file: products/001-init-products.sql,        relativeToChangelogFile: true }
+  - include: { file: products/002-insert-products.sql,      relativeToChangelogFile: true }
+  - include: { file: products/003-fk-orders-product_sku.sql, relativeToChangelogFile: true }
+
+  # Now that orders exists, create views
+  - include: { file: customer/R-customer-views-and-grants.sql, relativeToChangelogFile: true }
+  - include: { file: products/R-product-views-and-grants.sql,  relativeToChangelogFile: true }
+
+  # Procedures / cross-domain routines
+  - include: { file: procedures/004-proc-recalc-customer-stats.sql, relativeToChangelogFile: true }

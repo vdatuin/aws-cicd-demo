@@ -1,0 +1,98 @@
+name: DB CD to AWS RDS (Liquibase)
+
+on:
+  push:
+    branches: [ develop, main ]
+    tags: ['prod-*']
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve environment
+        id: env
+        run: |
+          ref="${GITHUB_REF}"
+          if [[ "$ref" == "refs/heads/develop" ]]; then
+            echo "name=dev" >> $GITHUB_OUTPUT
+            echo "secret_id=rds/appdb/dev" >> $GITHUB_OUTPUT
+          elif [[ "$ref" == "refs/heads/main" || "$ref" == refs/tags/prod-* ]]; then
+            echo "name=prod" >> $GITHUB_OUTPUT
+            echo "secret_id=rds/appdb/prod" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported ref: $ref"
+            exit 1
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/GitHubActions-${{ steps.env.outputs.name }}-Role
+
+      - name: Fetch DB secret
+        id: db
+        run: |
+          aws secretsmanager get-secret-value --secret-id "${{ steps.env.outputs.secret_id }}" \
+            --query SecretString --output text > secret.json
+          sudo apt-get update && sudo apt-get install -y jq postgresql-client
+          echo "host=$(jq -r .host secret.json)" >> $GITHUB_OUTPUT
+          echo "port=$(jq -r .port secret.json)" >> $GITHUB_OUTPUT
+          echo "dbname=$(jq -r .dbname secret.json)" >> $GITHUB_OUTPUT
+          echo "username=$(jq -r .username secret.json)" >> $GITHUB_OUTPUT
+          echo "password=$(jq -r .password secret.json)" >> $GITHUB_OUTPUT
+
+      - name: Setup Liquibase
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: '4.32.0'
+          edition: 'oss'
+
+      - name: Ensure app_readonly role exists
+        env:
+          PGPASSWORD: ${{ steps.db.outputs.password }}
+        run: |
+          psql "postgresql://${{ steps.db.outputs.username }}:${{ steps.db.outputs.password }}@${{ steps.db.outputs.host }}:${{ steps.db.outputs.port}}/${{ steps.db.outputs.dbname }}" \
+            -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
+            || psql "postgresql://${{ steps.db.outputs.username }}:${{ steps.db.outputs.password }}@${{ steps.db.outputs.host }}:${{ steps.db.outputs.port}}/${{ steps.db.outputs.dbname }}" \
+              -c "CREATE ROLE app_readonly;"
+
+      - name: Liquibase validate
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}" \
+            --username="${{ steps.db.outputs.username }}" \
+            --password="${{ steps.db.outputs.password }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            validate
+
+      - name: Liquibase update on RDS
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}" \
+            --username="${{ steps.db.outputs.username }}" \
+            --password="${{ steps.db.outputs.password }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update
+
+      - name: Post-deploy SQL (optional if present)
+        env:
+          PGPASSWORD: ${{ steps.db.outputs.password }}
+        run: |
+          if [ -f db/post_deploy/insert_minimal_data.sql ]; then
+            psql \
+              -h ${{ steps.db.outputs.host }} -p ${{ steps.db.outputs.port }} \
+              -U ${{ steps.db.outputs.username }} -d ${{ steps.db.outputs.dbname }} \
+              -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
+          fi

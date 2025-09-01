@@ -14,7 +14,7 @@ databaseChangeLog:
 
   # Products (create + seed first)
   - include: { file: products/001-init-products.sql, relativeToChangelogFile: true }
-  - include: { file: products/002-seed-products.sql, relativeToChangelogFile: true }
+  - include: { file: products/002-insert-products.sql, relativeToChangelogFile: true }
   # Add FK after orders exist (and after product seed)
   - include: { file: products/003-fk-orders-product_sku.sql, relativeToChangelogFile: true }
   - include: { file: products/R-product-views-and-grants.sql, relativeToChangelogFile: true }

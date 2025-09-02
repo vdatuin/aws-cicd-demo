@@ -8,8 +8,8 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
-  DB_USER: postgres               # <-- update if you use a different DB user
-  DB_NAME: appdb                  # <-- target database Liquibase manages
+  DB_USER: postgres             # change if you use a dedicated liquibase user
+  DB_NAME: appdb                # target database managed by Liquibase
   DB_PORT: "5432"
 
 jobs:
@@ -22,41 +22,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # --- Resolve environment (fixed) ---
       - name: Resolve environment
         id: env
+        shell: bash
         run: |
+          set -euo pipefail
           ref="${GITHUB_REF}"
-          if [[ "$ref" == "refs/heads/develop" ]]; then
-            echo "name=dev" >> $GITHUB_OUTPUT
-            echo "db_instance_id=cicddemo-dev" >> $GITHUB_OUTPUT   # <-- update with your dev RDS identifier
-          elif [[ "$ref" == "refs/heads/main" || "$ref" == refs/tags/prod-* ]]; then
-            echo "name=prod" >> $GITHUB_OUTPUT
-            echo "db_instance_id=cicddemo-prod" >> $GITHUB_OUTPUT  # <-- update with your prod RDS identifier
-          else
-            echo "Unsupported ref: $ref"
-            exit 1
+          case "$ref" in
+            refs/heads/develop)
+              echo "name=dev" >> "$GITHUB_OUTPUT"
+              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"     # <-- update to your DEV RDS identifier
+              ;;
+            refs/heads/main|refs/tags/prod-*)
+              echo "name=prod" >> "$GITHUB_OUTPUT"
+              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"    # <-- update to your PROD RDS identifier
+              ;;
+            *)
+              echo "Unsupported ref: $ref"
+              exit 1
+              ;;
+          esac
 
+      # --- Assume the right AWS role via OIDC ---
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/GitHubActions-${{ steps.env.outputs.name }}-Role
+          # role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/GitHubActions-${{ steps.env.outputs.name }}-Role
+          role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
 
       - name: Install clients
-        run: sudo apt-get update && sudo apt-get install -y jq postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq postgresql-client
 
+      # --- Discover runner IP & RDS metadata ---
       - name: Discover runner IP
         id: ip
-        run: echo "ip=$(curl -s https://ifconfig.me)" >> $GITHUB_OUTPUT
+        run: echo "ip=$(curl -s https://ifconfig.me)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve RDS host & SGs
         id: meta
         run: |
           DESC=$(aws rds describe-db-instances --db-instance-identifier "${{ steps.env.outputs.db_instance_id }}")
           HOST=$(echo "$DESC" | jq -r '.DBInstances[0].Endpoint.Address')
-          echo "host=$HOST" >> $GITHUB_OUTPUT
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "$DESC" | jq -r '.DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' > /tmp/sg_ids.txt
+          echo "Using RDS endpoint: $HOST"
+          echo "Attached SGs:"; cat /tmp/sg_ids.txt
 
+      # --- Temporarily allowlist the runner IP on port 5432 ---
       - name: Temporarily allowlist runner IP
         run: |
           while read -r SG; do
@@ -65,19 +81,21 @@ jobs:
             aws ec2 authorize-security-group-ingress \
               --group-id "$SG" \
               --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32,Description=GHA-${GITHUB_RUN_ID}}]" \
-              || true
+              || echo "Ingress may already exist for ${SG} (continuing)."
           done < /tmp/sg_ids.txt
 
+      # --- Ensure the target DB exists (create if missing) ---
       - name: Ensure target DB exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
           HOST=${{ steps.meta.outputs.host }}
-          echo "Checking if database $DB_NAME exists on $HOST..."
+          echo "Checking if database ${DB_NAME} exists on ${HOST}..."
           psql -h "$HOST" -p $DB_PORT -U $DB_USER -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
-            && echo "Database $DB_NAME already exists." \
+            && echo "Database ${DB_NAME} already exists." \
             || createdb -h "$HOST" -p $DB_PORT -U $DB_USER $DB_NAME
 
+      # --- Optional bootstrap role inside the DB ---
       - name: Ensure app_readonly role exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
@@ -87,6 +105,7 @@ jobs:
             || psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
               -c "CREATE ROLE app_readonly;"
 
+      # --- Liquibase ---
       - name: Setup Liquibase
         uses: liquibase/setup-liquibase@v1
         with:
@@ -113,17 +132,18 @@ jobs:
             --log-level=info \
             update
 
+      # --- Optional post-deploy SQL ---
       - name: Post-deploy SQL (optional if present)
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
           if [ -f db/post_deploy/insert_minimal_data.sql ]; then
-            psql \
-              -h ${{ steps.meta.outputs.host }} -p ${{ env.DB_PORT }} \
-              -U ${{ env.DB_USER }} -d ${{ env.DB_NAME }} \
-              -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
+            psql -h "${{ steps.meta.outputs.host }}" -p "${{ env.DB_PORT }}" \
+                 -U "${{ env.DB_USER }}" -d "${{ env.DB_NAME }}" \
+                 -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
           fi
 
+      # --- Cleanup: remove the temporary SG rule(s) ---
       - name: Cleanup SG ingress
         if: always()
         run: |

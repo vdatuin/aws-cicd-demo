@@ -1,4 +1,4 @@
-name: DB CD to AWS RDS (Liquibase)
+name: DB CD to AWS RDS (Liquibase via SSH tunnel)
 
 on:
   push:
@@ -7,176 +7,89 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: ap-southeast-1
+  # DB/RDS
   DB_USER: postgres
   DB_NAME: appdb
   DB_PORT: "5432"
+  RDS_HOST: cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com  # <- same as admin's command
+  # SSH tunnel
+  LOCAL_DB_PORT: "65432"
+  BASTION_HOST: "13.215.152.139"   # <- same as admin's command
+  BASTION_USER: "ec2-user"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
+      id-token: write  # (not strictly needed here since we don't call AWS)
 
     steps:
       - uses: actions/checkout@v4
 
-      # --- Resolve environment (dev/prod) ---
-      - name: Resolve environment
-        id: env
-        shell: bash
-        run: |
-          set -euo pipefail
-          ref="${GITHUB_REF}"
-          case "$ref" in
-            refs/heads/develop)
-              echo "name=dev" >> "$GITHUB_OUTPUT"
-              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"
-              ;;
-            refs/heads/main|refs/tags/prod-*)
-              echo "name=prod" >> "$GITHUB_OUTPUT"
-              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Unsupported ref: $ref"
-              exit 1
-              ;;
-          esac
-
-      # --- Select role ARN based on env ---
-      - name: Select role ARN
-        id: role
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.env.outputs.name }}" = "prod" ]; then
-            echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Prod-Role' >> "$GITHUB_OUTPUT"
-          else
-            echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Dev-Role' >> "$GITHUB_OUTPUT"
-          fi
-
-      # --- Assume the right AWS role via OIDC ---
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ steps.role.outputs.arn }}
-          role-session-name: gha-${{ github.run_id }}-${{ github.job }}
-
-      - name: Install clients
+      - name: Install clients & tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq postgresql-client netcat-openbsd curl
+          sudo apt-get install -y postgresql-client putty-tools openssh-client netcat-openbsd curl
 
-      # --- Discover runner IP & RDS metadata ---
-      - name: Discover runner IP
-        id: ip
-        run: echo "ip=$(curl -s https://ifconfig.me)" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve RDS host & SGs
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          DESC="$(aws rds describe-db-instances --db-instance-identifier "${{ steps.env.outputs.db_instance_id }}")"
-          HOST="$(echo "$DESC" | jq -r '.DBInstances[0].Endpoint.Address')"
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-          echo "$DESC" | jq -r '.DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' > /tmp/sg_ids.txt
-          echo "Using RDS endpoint: $HOST"
-          echo "Attached SGs:"; cat /tmp/sg_ids.txt
-
-      # --- Temporarily allowlist the runner IP on port 5432 ---
-      - name: Temporarily allowlist runner IP
-        shell: bash
-        run: |
-          while read -r SG; do
-            [ -z "$SG" ] && continue
-            echo "Authorizing ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
-            set +e
-            aws ec2 authorize-security-group-ingress \
-              --group-id "$SG" \
-              --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32,Description=GHA-${GITHUB_RUN_ID}}]"
-            rc=$?
-            if [ $rc -eq 0 ]; then
-              echo "Ingress added to $SG"
-            else
-              echo "Authorize returned rc=$rc (may already exist); continuing…"
-            fi
-            set -e
-          done < /tmp/sg_ids.txt
-
-      # ===================== DEBUG BLOCK =====================
-
-      - name: Reconfirm runner public IP (dual sources)
-        id: ip2
-        run: |
-          set -euo pipefail
-          IP1="$(curl -s https://ifconfig.me || true)"
-          IP2="$(curl -s https://api.ipify.org || true)"
-          echo "ip_ifconfig=${IP1}" >> "$GITHUB_OUTPUT"
-          echo "ip_ipify=${IP2}" >> "$GITHUB_OUTPUT"
-          echo "Runner IPs: ifconfig.me=${IP1} ; ipify=${IP2}"
-
-      - name: Show inbound rules on RDS SGs
-        shell: bash
-        run: |
-          while read -r SG; do
-            [ -z "$SG" ] && continue
-            echo "---- $SG inbound rules ----"
-            aws ec2 describe-security-groups --group-ids "$SG" \
-              --query 'SecurityGroups[0].IpPermissions[].{From:FromPort,To:ToPort,CIDRs:IpRanges[*].CidrIp,Desc:IpRanges[*].Description,SrcSG:UserIdGroupPairs[*].GroupId}' \
-              --output table
-          done < /tmp/sg_ids.txt
-
-      - name: Resolve DB endpoint to IPv4 addresses
-        shell: bash
-        run: |
-          set -euo pipefail
-          H="${{ steps.meta.outputs.host }}"
-          echo "Endpoint: $H"
-          getent ahostsv4 "$H" | awk '{print $1}' | sort -u | sed 's/^/ - /'
-
-      - name: Connectivity probes (nc + pg_isready)
+      # Write the PPK from secret and convert to OpenSSH PEM (OpenSSH can't read .ppk)
+      - name: Prepare SSH key from PPK
         env:
-          HOST: ${{ steps.meta.outputs.host }}
-          PORT: ${{ env.DB_PORT }}
-          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
-          USER: ${{ env.DB_USER }}
+          BASTION_PPK: ${{ secrets.BASTION_PPK }}
+        run: |
+          set -euo pipefail
+          test -n "$BASTION_PPK" || (echo "BASTION_PPK secret is empty"; exit 1)
+          printf "%s\n" "$BASTION_PPK" > cicddemo.ppk
+          chmod 600 cicddemo.ppk
+          puttygen cicddemo.ppk -O private-openssh -o cicddemo.pem
+          chmod 600 cicddemo.pem
+
+      # Open the same tunnel your admin uses:
+      #   ssh -i cicddemo.pem -L 65432:<RDS_HOST>:5432 ec2-user@13.215.152.139
+      - name: Open SSH tunnel
         shell: bash
+        run: |
+          set -euo pipefail
+          echo "Opening tunnel 127.0.0.1:${LOCAL_DB_PORT} -> ${RDS_HOST}:${DB_PORT} via ${BASTION_USER}@${BASTION_HOST}"
+          ssh -i cicddemo.pem \
+              -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=15 \
+              -o ExitOnForwardFailure=yes \
+              -M -S /tmp/sshtunnel-${GITHUB_RUN_ID} \
+              -fnNT -L 127.0.0.1:${LOCAL_DB_PORT}:${RDS_HOST}:${DB_PORT} \
+              ${BASTION_USER}@${BASTION_HOST}
+          echo "Tunnel up."
+
+      # Quick sanity checks through the tunnel
+      - name: Connectivity check (nc + pg_isready)
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
           set -e
-          echo "nc probe (5s timeout)…"
-          nc -vz -w 5 "$HOST" "$PORT" || echo "nc timed out/refused"
-          echo "pg_isready…"
-          pg_isready -h "$HOST" -p "$PORT" -U "$USER" -t 5 || echo "pg_isready did not report accepting yet"
+          nc -vz -w 5 127.0.0.1 "${LOCAL_DB_PORT}" || echo "nc timed out/refused"
+          pg_isready -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -t 5 || echo "pg_isready not ready yet"
 
-      # =================== END DEBUG BLOCK ===================
-
-      # --- Ensure the target DB exists (create if missing) ---
+      # Create database if missing (via tunnel)
       - name: Ensure target DB exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
-        shell: bash
         run: |
           set -e
-          HOST=${{ steps.meta.outputs.host }}
-          echo "Checking if database ${DB_NAME} exists on ${HOST}..."
-          psql -h "$HOST" -p "$DB_PORT" -U "$DB_USER" -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres \
+               -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
             && echo "Database ${DB_NAME} already exists." \
-            || createdb -h "$HOST" -p "$DB_PORT" -U "$DB_USER" "$DB_NAME"
+            || createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB_NAME}"
 
-      # --- Optional bootstrap role inside the DB ---
+      # Optional least-privilege role (kept; harmless if it already exists)
       - name: Ensure app_readonly role exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
-          psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+          psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
             -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
-            || psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
-              -c "CREATE ROLE app_readonly;"
+            || psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
+                 -c "CREATE ROLE app_readonly;"
 
-      # --- Liquibase ---
       - name: Setup Liquibase
         uses: liquibase/setup-liquibase@v1
         with:
@@ -186,43 +99,35 @@ jobs:
       - name: Liquibase validate
         run: |
           liquibase \
-            --url="jdbc:postgresql://${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
             --username="${{ env.DB_USER }}" \
             --password="${{ secrets.RDS_PASSWORD }}" \
             --changeLogFile="db/changelog/master.yaml" \
             --log-level=info \
             validate
 
-      - name: Liquibase update on RDS
+      - name: Liquibase update on RDS (via tunnel)
         run: |
           liquibase \
-            --url="jdbc:postgresql://${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
             --username="${{ env.DB_USER }}" \
             --password="${{ secrets.RDS_PASSWORD }}" \
             --changeLogFile="db/changelog/master.yaml" \
             --log-level=info \
             update
 
-      # --- Optional post-deploy SQL ---
-      - name: Post-deploy SQL (optional if present)
+      - name: Post-deploy SQL (optional)
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
           if [ -f db/post_deploy/insert_minimal_data.sql ]; then
-            psql -h "${{ steps.meta.outputs.host }}" -p "${{ env.DB_PORT }}" \
+            psql -h 127.0.0.1 -p "${{ env.LOCAL_DB_PORT }}" \
                  -U "${{ env.DB_USER }}" -d "${{ env.DB_NAME }}" \
                  -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
           fi
 
-      # --- Cleanup: remove the temporary SG rule(s) ---
-      - name: Cleanup SG ingress
+      # Close the tunnel cleanly
+      - name: Close SSH tunnel
         if: always()
-        shell: bash
         run: |
-          while read -r SG; do
-            [ -z "$SG" ] && continue
-            echo "Revoking ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
-            aws ec2 revoke-security-group-ingress \
-              --group-id "$SG" \
-              --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32}]"
-          done < /tmp/sg_ids.txt
+          ssh -S /tmp/sshtunnel-${GITHUB_RUN_ID} -O exit ${BASTION_USER}@${BASTION_HOST} || true

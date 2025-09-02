@@ -1,0 +1,165 @@
+name: CD to S3 (develop → dev, main/prod-* → prod)
+
+on:
+  push:
+    branches: [ develop, main ]
+    tags: ['prod-*']
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ap-southeast-1
+  BUCKET_NAME: dxc-cicd-artifacts-bucket
+
+jobs:
+  build_test_package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      envname: ${{ steps.set-env.outputs.envname }}
+      build_id: ${{ steps.set-env.outputs.build_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine environment (dev/prod)
+        id: set-env
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          case "$ref" in
+            refs/heads/develop)
+              echo "envname=dev" >> "$GITHUB_OUTPUT"
+              ;;
+            refs/heads/main|refs/tags/prod-*)
+              echo "envname=prod" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unsupported ref: $ref"; exit 1
+              ;;
+          esac
+          echo "build_id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          flake8 src tests --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src tests --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+
+      - name: Build wheel (and sdist)
+        run: python -m build
+
+      - name: Install built wheel
+        run: pip install dist/*.whl
+
+      - name: Run demo (prints & saves outputs)
+        run: python src/retail.py
+
+      - name: Pytest with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          pytest -q --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: Upload local artifacts (for run record)
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-build-artifacts
+          path: |
+            dist/*.whl
+            run_outputs/**
+            coverage.xml
+
+  deploy_to_s3:
+    needs: build_test_package
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts from previous job
+        uses: actions/download-artifact@v4
+        with:
+          name: local-build-artifacts
+          path: out
+
+      # --- OIDC debug: show claims (should be ref:* now, not environment:*) ---
+      - name: Inspect OIDC token claims
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            core.info(JSON.stringify({
+              iss: payload.iss,
+              aud: payload.aud,
+              sub: payload.sub,
+              repository: process.env.GITHUB_REPOSITORY,
+              ref: process.env.GITHUB_REF,
+              event_name: process.env.GITHUB_EVENT_NAME
+            }, null, 2));
+
+      # --- Select role ARN based on ref-derived env (dev/main|prod-*) ---
+      - name: Select role ARN
+        id: role
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.build_test_package.outputs.envname }}" = "prod" ]; then
+            echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Prod-Role' >> "$GITHUB_OUTPUT"
+          else
+            echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Dev-Role' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ steps.role.outputs.arn }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.job }}
+
+      - name: Who am I (STS)
+        run: aws sts get-caller-identity
+
+      - name: Compute S3 prefix (env/build-id)
+        id: prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "prefix=${{ needs.build_test_package.outputs.envname }}/${{ needs.build_test_package.outputs.build_id }}" >> "$GITHUB_OUTPUT"
+          echo "Using s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/"
+
+      - name: Ensure files exist
+        shell: bash
+        run: |
+          ls -l out || (echo "Missing 'out' directory"; exit 1)
+          ls -l out/dist || (echo "Missing built wheels in out/dist"; exit 1)
+          test -f out/coverage.xml || (echo "Missing coverage.xml"; exit 1)
+
+      - name: Upload wheel(s) to S3
+        run: aws s3 cp out/dist/ s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/ --recursive --exclude "*" --include "*.whl"
+
+      - name: Upload run outputs (CSV/JSON/TXT)
+        shell: bash
+        run: |
+          if [ -d out/run_outputs ]; then
+            aws s3 cp out/run_outputs/ s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/run_outputs/ --recursive
+          else
+            echo "No run_outputs directory found; skipping."
+          fi
+
+      - name: Upload coverage report
+        run: aws s3 cp out/coverage.xml s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/

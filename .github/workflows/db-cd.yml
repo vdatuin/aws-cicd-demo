@@ -1,0 +1,147 @@
+name: DB CD to AWS RDS (Liquibase via SSH tunnel)
+
+on:
+  push:
+    branches: [ develop, main ]
+    tags: ['prod-*']
+  workflow_dispatch:
+
+env:
+  # DB/RDS
+  DB_USER: postgres
+  DB_NAME_BASE: cicddemodb
+  DB_PORT: "5432"
+  RDS_HOST: cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com
+  # SSH tunnel
+  LOCAL_DB_PORT: "65432"
+  BASTION_HOST: "13.215.152.139"
+  BASTION_USER: "ec2-user"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Decide target DB based on ref:
+      # - main branch OR prod-* tags => cicddemodb_prod
+      # - otherwise => cicddemodb
+      - name: Set target DB name
+        id: targetdb
+        run: |
+          set -euo pipefail
+          REF_NAME="${GITHUB_REF_NAME}"
+          REF_FULL="${GITHUB_REF}"
+          TARGET="${DB_NAME_BASE}"
+
+          if [ "$REF_NAME" = "main" ] || [[ "$REF_FULL" == refs/tags/prod-* ]]; then
+            TARGET="${DB_NAME_BASE}_prod"
+          fi
+
+          echo "TARGET_DB_NAME=$TARGET" | tee -a "$GITHUB_ENV"
+          echo "Using database: $TARGET"
+
+      - name: Install clients & tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client putty-tools openssh-client netcat-openbsd curl
+
+      # Prepare SSH key from PPK secret
+      - name: Prepare SSH key from PPK
+        env:
+          BASTION_PPK: ${{ secrets.BASTION_PPK }}
+        run: |
+          set -euo pipefail
+          test -n "$BASTION_PPK" || (echo "BASTION_PPK secret is empty"; exit 1)
+          printf "%s\n" "$BASTION_PPK" > cicddemo.ppk
+          chmod 600 cicddemo.ppk
+          puttygen cicddemo.ppk -O private-openssh -o cicddemo.pem
+          chmod 600 cicddemo.pem
+
+      - name: Open SSH tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Opening tunnel 127.0.0.1:${LOCAL_DB_PORT} -> ${RDS_HOST}:${DB_PORT} via ${BASTION_USER}@${BASTION_HOST}"
+          ssh -i cicddemo.pem \
+              -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=15 \
+              -o ExitOnForwardFailure=yes \
+              -M -S /tmp/sshtunnel-${GITHUB_RUN_ID} \
+              -fnNT -L 127.0.0.1:${LOCAL_DB_PORT}:${RDS_HOST}:${DB_PORT} \
+              ${BASTION_USER}@${BASTION_HOST}
+          echo "Tunnel up."
+
+      - name: Connectivity check (nc + pg_isready)
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          set -e
+          nc -vz -w 5 127.0.0.1 "${LOCAL_DB_PORT}" || echo "nc timed out/refused"
+          pg_isready -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -t 5 || echo "pg_isready not ready yet"
+
+      # Create the TARGET_DB_NAME if it doesn't exist
+      - name: Ensure target DB exists
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          set -e
+          DB="${TARGET_DB_NAME}"
+          echo "Ensuring database exists: ${DB}"
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres \
+               -tc "SELECT 1 FROM pg_database WHERE datname='${DB}'" | grep -q 1 \
+            && echo "Database ${DB} already exists." \
+            || createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB}"
+
+      - name: Ensure app_readonly role exists
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          URI="postgresql://${DB_USER}:${PGPASSWORD}@127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require"
+          psql "$URI" -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
+            || psql "$URI" -c "CREATE ROLE app_readonly;"
+
+      - name: Setup Liquibase
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: '4.32.0'
+          edition: 'oss'
+
+      - name: Liquibase validate
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.TARGET_DB_NAME }}?sslmode=require" \
+            --username="${{ env.DB_USER }}" \
+            --password="${{ secrets.RDS_PASSWORD }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            validate
+
+      - name: Liquibase update on RDS (via tunnel)
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.TARGET_DB_NAME }}?sslmode=require" \
+            --username="${{ env.DB_USER }}" \
+            --password="${{ secrets.RDS_PASSWORD }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update
+
+      - name: Post-deploy SQL (optional)
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          if [ -f db/post_deploy/insert_minimal_data.sql ]; then
+            psql -h 127.0.0.1 -p "${{ env.LOCAL_DB_PORT }}" \
+                 -U "${{ env.DB_USER }}" -d "${{ env.TARGET_DB_NAME }}" \
+                 -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
+          fi
+
+      - name: Close SSH tunnel
+        if: always()
+        run: |
+          ssh -S /tmp/sshtunnel-${GITHUB_RUN_ID} -O exit ${BASTION_USER}@${BASTION_HOST} || true

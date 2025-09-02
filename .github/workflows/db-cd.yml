@@ -9,7 +9,7 @@ on:
 env:
   # DB/RDS
   DB_USER: postgres
-  DB_NAME_BASE: appdb            # <— base name; we’ll suffix _prod for main/tags
+  DB_NAME_BASE: cicddemodb
   DB_PORT: "5432"
   RDS_HOST: cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com
   # SSH tunnel
@@ -28,8 +28,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # Decide target DB based on ref:
-      # - main branch OR prod-* tags => appdb_prod
-      # - otherwise => appdb
+      # - main branch OR prod-* tags => cicddemodb_prod
+      # - otherwise => cicddemodb
       - name: Set target DB name
         id: targetdb
         run: |

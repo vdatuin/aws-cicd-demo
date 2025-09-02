@@ -67,7 +67,7 @@ jobs:
       - name: Install clients
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq postgresql-client netcat-traditional python3 curl
+          sudo apt-get install -y jq postgresql-client netcat-openbsd curl
 
       # --- Discover runner IP & RDS metadata ---
       - name: Discover runner IP
@@ -76,6 +76,7 @@ jobs:
 
       - name: Resolve RDS host & SGs
         id: meta
+        shell: bash
         run: |
           set -euo pipefail
           DESC="$(aws rds describe-db-instances --db-instance-identifier "${{ steps.env.outputs.db_instance_id }}")"
@@ -118,6 +119,7 @@ jobs:
           echo "Runner IPs: ifconfig.me=${IP1} ; ipify=${IP2}"
 
       - name: Show inbound rules on RDS SGs
+        shell: bash
         run: |
           while read -r SG; do
             [ -z "$SG" ] && continue
@@ -127,22 +129,13 @@ jobs:
               --output table
           done < /tmp/sg_ids.txt
 
-      - name: Resolve DB endpoint to A records
+      - name: Resolve DB endpoint to IPv4 addresses
+        shell: bash
         run: |
           set -euo pipefail
           H="${{ steps.meta.outputs.host }}"
           echo "Endpoint: $H"
-          python3 - "$H" <<'PY'
-import socket, sys
-h = sys.argv[1]
-seen = set()
-for fam,_,_,_,sa in socket.getaddrinfo(h, None):
-    if fam == socket.AF_INET:
-        seen.add(sa[0])
-print("Resolved IPv4 addresses:")
-for a in sorted(seen):
-    print(" -", a)
-PY
+          getent ahostsv4 "$H" | awk '{print $1}' | sort -u | sed 's/^/ - /'
 
       - name: Connectivity probes (nc + pg_isready)
         env:
@@ -150,10 +143,11 @@ PY
           PORT: ${{ env.DB_PORT }}
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
           USER: ${{ env.DB_USER }}
+        shell: bash
         run: |
           set -e
           echo "nc probe (5s timeout)…"
-          timeout 5 bash -lc 'nc -vz "$HOST" "$PORT"' || echo "nc timed out/refused"
+          nc -vz -w 5 "$HOST" "$PORT" || echo "nc timed out/refused"
           echo "pg_isready…"
           pg_isready -h "$HOST" -p "$PORT" -U "$USER" -t 5 || echo "pg_isready did not report accepting yet"
 
@@ -163,6 +157,7 @@ PY
       - name: Ensure target DB exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        shell: bash
         run: |
           set -e
           HOST=${{ steps.meta.outputs.host }}
@@ -222,6 +217,7 @@ PY
       # --- Cleanup: remove the temporary SG rule(s) ---
       - name: Cleanup SG ingress
         if: always()
+        shell: bash
         run: |
           while read -r SG; do
             [ -z "$SG" ] && continue

@@ -9,12 +9,12 @@ on:
 env:
   # DB/RDS
   DB_USER: postgres
-  DB_NAME: appdb
+  DB_NAME_BASE: appdb            # <— base name; we’ll suffix _prod for main/tags
   DB_PORT: "5432"
-  RDS_HOST: cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com  # <- same as admin's command
+  RDS_HOST: cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com
   # SSH tunnel
   LOCAL_DB_PORT: "65432"
-  BASTION_HOST: "13.215.152.139"   # <- same as admin's command
+  BASTION_HOST: "13.215.152.139"
   BASTION_USER: "ec2-user"
 
 jobs:
@@ -22,17 +22,35 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # (not strictly needed here since we don't call AWS)
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
+
+      # Decide target DB based on ref:
+      # - main branch OR prod-* tags => appdb_prod
+      # - otherwise => appdb
+      - name: Set target DB name
+        id: targetdb
+        run: |
+          set -euo pipefail
+          REF_NAME="${GITHUB_REF_NAME}"
+          REF_FULL="${GITHUB_REF}"
+          TARGET="${DB_NAME_BASE}"
+
+          if [ "$REF_NAME" = "main" ] || [[ "$REF_FULL" == refs/tags/prod-* ]]; then
+            TARGET="${DB_NAME_BASE}_prod"
+          fi
+
+          echo "TARGET_DB_NAME=$TARGET" | tee -a "$GITHUB_ENV"
+          echo "Using database: $TARGET"
 
       - name: Install clients & tools
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client putty-tools openssh-client netcat-openbsd curl
 
-      # Write the PPK from secret and convert to OpenSSH PEM (OpenSSH can't read .ppk)
+      # Prepare SSH key from PPK secret
       - name: Prepare SSH key from PPK
         env:
           BASTION_PPK: ${{ secrets.BASTION_PPK }}
@@ -44,8 +62,6 @@ jobs:
           puttygen cicddemo.ppk -O private-openssh -o cicddemo.pem
           chmod 600 cicddemo.pem
 
-      # Open the same tunnel your admin uses:
-      #   ssh -i cicddemo.pem -L 65432:<RDS_HOST>:5432 ec2-user@13.215.152.139
       - name: Open SSH tunnel
         shell: bash
         run: |
@@ -60,7 +76,6 @@ jobs:
               ${BASTION_USER}@${BASTION_HOST}
           echo "Tunnel up."
 
-      # Quick sanity checks through the tunnel
       - name: Connectivity check (nc + pg_isready)
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
@@ -69,26 +84,26 @@ jobs:
           nc -vz -w 5 127.0.0.1 "${LOCAL_DB_PORT}" || echo "nc timed out/refused"
           pg_isready -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -t 5 || echo "pg_isready not ready yet"
 
-      # Create database if missing (via tunnel)
+      # Create the TARGET_DB_NAME if it doesn't exist
       - name: Ensure target DB exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
           set -e
+          DB="${TARGET_DB_NAME}"
+          echo "Ensuring database exists: ${DB}"
           psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres \
-               -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
-            && echo "Database ${DB_NAME} already exists." \
-            || createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB_NAME}"
+               -tc "SELECT 1 FROM pg_database WHERE datname='${DB}'" | grep -q 1 \
+            && echo "Database ${DB} already exists." \
+            || createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB}"
 
-      # Optional least-privilege role (kept; harmless if it already exists)
       - name: Ensure app_readonly role exists
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
-          psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
-            -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
-            || psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
-                 -c "CREATE ROLE app_readonly;"
+          URI="postgresql://${DB_USER}:${PGPASSWORD}@127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require"
+          psql "$URI" -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
+            || psql "$URI" -c "CREATE ROLE app_readonly;"
 
       - name: Setup Liquibase
         uses: liquibase/setup-liquibase@v1
@@ -99,7 +114,7 @@ jobs:
       - name: Liquibase validate
         run: |
           liquibase \
-            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
+            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.TARGET_DB_NAME }}?sslmode=require" \
             --username="${{ env.DB_USER }}" \
             --password="${{ secrets.RDS_PASSWORD }}" \
             --changeLogFile="db/changelog/master.yaml" \
@@ -109,7 +124,7 @@ jobs:
       - name: Liquibase update on RDS (via tunnel)
         run: |
           liquibase \
-            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.DB_NAME }}?sslmode=require" \
+            --url="jdbc:postgresql://127.0.0.1:${{ env.LOCAL_DB_PORT }}/${{ env.TARGET_DB_NAME }}?sslmode=require" \
             --username="${{ env.DB_USER }}" \
             --password="${{ secrets.RDS_PASSWORD }}" \
             --changeLogFile="db/changelog/master.yaml" \
@@ -122,11 +137,10 @@ jobs:
         run: |
           if [ -f db/post_deploy/insert_minimal_data.sql ]; then
             psql -h 127.0.0.1 -p "${{ env.LOCAL_DB_PORT }}" \
-                 -U "${{ env.DB_USER }}" -d "${{ env.DB_NAME }}" \
+                 -U "${{ env.DB_USER }}" -d "${{ env.TARGET_DB_NAME }}" \
                  -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
           fi
 
-      # Close the tunnel cleanly
       - name: Close SSH tunnel
         if: always()
         run: |

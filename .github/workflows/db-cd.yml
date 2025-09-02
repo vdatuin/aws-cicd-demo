@@ -8,6 +8,9 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
+  DB_USER: postgres               # <-- update if you use a different DB user
+  DB_NAME: appdb                  # <-- target database Liquibase manages
+  DB_PORT: "5432"
 
 jobs:
   deploy:
@@ -25,10 +28,10 @@ jobs:
           ref="${GITHUB_REF}"
           if [[ "$ref" == "refs/heads/develop" ]]; then
             echo "name=dev" >> $GITHUB_OUTPUT
-            echo "secret_id=rds/appdb/dev" >> $GITHUB_OUTPUT
+            echo "db_instance_id=cicddemo-dev" >> $GITHUB_OUTPUT   # <-- update with your dev RDS identifier
           elif [[ "$ref" == "refs/heads/main" || "$ref" == refs/tags/prod-* ]]; then
             echo "name=prod" >> $GITHUB_OUTPUT
-            echo "secret_id=rds/appdb/prod" >> $GITHUB_OUTPUT
+            echo "db_instance_id=cicddemo-prod" >> $GITHUB_OUTPUT  # <-- update with your prod RDS identifier
           else
             echo "Unsupported ref: $ref"
             exit 1
@@ -39,17 +42,50 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/GitHubActions-${{ steps.env.outputs.name }}-Role
 
-      - name: Fetch DB secret
-        id: db
+      - name: Install clients
+        run: sudo apt-get update && sudo apt-get install -y jq postgresql-client
+
+      - name: Discover runner IP
+        id: ip
+        run: echo "ip=$(curl -s https://ifconfig.me)" >> $GITHUB_OUTPUT
+
+      - name: Resolve RDS host & SGs
+        id: meta
         run: |
-          aws secretsmanager get-secret-value --secret-id "${{ steps.env.outputs.secret_id }}" \
-            --query SecretString --output text > secret.json
-          sudo apt-get update && sudo apt-get install -y jq postgresql-client
-          echo "host=$(jq -r .host secret.json)" >> $GITHUB_OUTPUT
-          echo "port=$(jq -r .port secret.json)" >> $GITHUB_OUTPUT
-          echo "dbname=$(jq -r .dbname secret.json)" >> $GITHUB_OUTPUT
-          echo "username=$(jq -r .username secret.json)" >> $GITHUB_OUTPUT
-          echo "password=$(jq -r .password secret.json)" >> $GITHUB_OUTPUT
+          DESC=$(aws rds describe-db-instances --db-instance-identifier "${{ steps.env.outputs.db_instance_id }}")
+          HOST=$(echo "$DESC" | jq -r '.DBInstances[0].Endpoint.Address')
+          echo "host=$HOST" >> $GITHUB_OUTPUT
+          echo "$DESC" | jq -r '.DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' > /tmp/sg_ids.txt
+
+      - name: Temporarily allowlist runner IP
+        run: |
+          while read -r SG; do
+            [ -z "$SG" ] && continue
+            echo "Authorizing ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32,Description=GHA-${GITHUB_RUN_ID}}]" \
+              || true
+          done < /tmp/sg_ids.txt
+
+      - name: Ensure target DB exists
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          HOST=${{ steps.meta.outputs.host }}
+          echo "Checking if database $DB_NAME exists on $HOST..."
+          psql -h "$HOST" -p $DB_PORT -U $DB_USER -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
+            && echo "Database $DB_NAME already exists." \
+            || createdb -h "$HOST" -p $DB_PORT -U $DB_USER $DB_NAME
+
+      - name: Ensure app_readonly role exists
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+            -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
+            || psql "postgresql://${{ env.DB_USER }}:${{ secrets.RDS_PASSWORD }}@${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+              -c "CREATE ROLE app_readonly;"
 
       - name: Setup Liquibase
         uses: liquibase/setup-liquibase@v1
@@ -57,21 +93,12 @@ jobs:
           version: '4.32.0'
           edition: 'oss'
 
-      - name: Ensure app_readonly role exists
-        env:
-          PGPASSWORD: ${{ steps.db.outputs.password }}
-        run: |
-          psql "postgresql://${{ steps.db.outputs.username }}:${{ steps.db.outputs.password }}@${{ steps.db.outputs.host }}:${{ steps.db.outputs.port}}/${{ steps.db.outputs.dbname }}" \
-            -tc "SELECT 1 FROM pg_roles WHERE rolname='app_readonly'" | grep -q 1 \
-            || psql "postgresql://${{ steps.db.outputs.username }}:${{ steps.db.outputs.password }}@${{ steps.db.outputs.host }}:${{ steps.db.outputs.port}}/${{ steps.db.outputs.dbname }}" \
-              -c "CREATE ROLE app_readonly;"
-
       - name: Liquibase validate
         run: |
           liquibase \
-            --url="jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}" \
-            --username="${{ steps.db.outputs.username }}" \
-            --password="${{ steps.db.outputs.password }}" \
+            --url="jdbc:postgresql://${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+            --username="${{ env.DB_USER }}" \
+            --password="${{ secrets.RDS_PASSWORD }}" \
             --changeLogFile="db/changelog/master.yaml" \
             --log-level=info \
             validate
@@ -79,20 +106,31 @@ jobs:
       - name: Liquibase update on RDS
         run: |
           liquibase \
-            --url="jdbc:postgresql://${{ steps.db.outputs.host }}:${{ steps.db.outputs.port }}/${{ steps.db.outputs.dbname }}" \
-            --username="${{ steps.db.outputs.username }}" \
-            --password="${{ steps.db.outputs.password }}" \
+            --url="jdbc:postgresql://${{ steps.meta.outputs.host }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}" \
+            --username="${{ env.DB_USER }}" \
+            --password="${{ secrets.RDS_PASSWORD }}" \
             --changeLogFile="db/changelog/master.yaml" \
             --log-level=info \
             update
 
       - name: Post-deploy SQL (optional if present)
         env:
-          PGPASSWORD: ${{ steps.db.outputs.password }}
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
           if [ -f db/post_deploy/insert_minimal_data.sql ]; then
             psql \
-              -h ${{ steps.db.outputs.host }} -p ${{ steps.db.outputs.port }} \
-              -U ${{ steps.db.outputs.username }} -d ${{ steps.db.outputs.dbname }} \
+              -h ${{ steps.meta.outputs.host }} -p ${{ env.DB_PORT }} \
+              -U ${{ env.DB_USER }} -d ${{ env.DB_NAME }} \
               -v ON_ERROR_STOP=1 -f db/post_deploy/insert_minimal_data.sql
           fi
+
+      - name: Cleanup SG ingress
+        if: always()
+        run: |
+          while read -r SG; do
+            [ -z "$SG" ] && continue
+            echo "Revoking ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
+            aws ec2 revoke-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32}]"
+          done < /tmp/sg_ids.txt

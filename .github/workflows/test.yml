@@ -1,21 +1,25 @@
 name: Test OIDC to AWS S3 and RDS
 
 on:
-  workflow_dispatch: # run manually
+  workflow_dispatch:
 
 jobs:
   test-s3:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write     # needed for OIDC to AWS
       contents: read
+    env:
+      AWS_REGION: ap-southeast-1
+      S3_BUCKET: dxc-cicd-artifacts-bucket
+      S3_PREFIX: dev
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-region: ap-southeast-1
+          aws-region: ${{ env.AWS_REGION }}
           role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
 
       - name: Who am I (STS)
@@ -24,22 +28,80 @@ jobs:
       - name: Upload test file to S3
         run: |
           echo "Hello from GitHub OIDC at $(date -u)" > test.txt
-          aws s3 cp test.txt s3://dxc-cicd-artifacts-bucket/dev/test-connection.txt
+          aws s3 cp test.txt "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/test-connection.txt"
 
       - name: List uploaded object
-        run: aws s3 ls s3://dxc-cicd-artifacts-bucket/dev/
+        run: aws s3 ls "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/"
 
-  # test-rds:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Install PostgreSQL client
-  #       run: sudo apt-get update && sudo apt-get install -y postgresql-client
+  test-rds-public:
+    runs-on: ubuntu-latest
+    needs: [test-s3]
+    permissions:
+      id-token: write     # needed for OIDC to AWS
+      contents: read
+    env:
+      AWS_REGION: ap-southeast-1
+      DB_INSTANCE_ID: cicddemo-1
+      DB_PORT: "5432"
+      DB_NAME: postgres
+      DB_USER: postgres
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
 
-  #     - name: Test RDS connection
-  #       run: |
-  #         PGPASSWORD=cicddemo12345 \
-  #         psql -h cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com \
-  #              -U postgres \
-  #              -d postgres \
-  #              -p 5432 \
-  #              -c "SELECT now();"
+      - name: Install PostgreSQL client & jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client jq
+
+      - name: Discover runner public IP
+        id: ip
+        run: |
+          IP=$(curl -s https://ifconfig.me)
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "Runner public IP: $IP"
+
+      - name: Resolve DB host and attached SGs
+        id: meta
+        run: |
+          DESC=$(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE_ID")
+          HOST=$(echo "$DESC" | jq -r '.DBInstances[0].Endpoint.Address')
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "$DESC" | jq -r '.DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' > /tmp/sg_ids.txt
+          echo "Security groups attached to DB:"
+          cat /tmp/sg_ids.txt
+
+      - name: Temporarily allowlist runner IP on all DB SGs (tcp/5432)
+        id: open
+        run: |
+          set -e
+          while read -r SG; do
+            [ -z "$SG" ] && continue
+            echo "Authorizing ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions IpProtocol=tcp,FromPort=${{ env.DB_PORT }},ToPort=${{ env.DB_PORT }},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32,Description=GitHubActions-${GITHUB_RUN_ID}}]" \
+              || echo "Ingress may already exist for ${SG} (continuing)."
+          done < /tmp/sg_ids.txt
+
+      - name: Test psql (TLS + password)
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          HOST="${{ steps.meta.outputs.host }}"
+          echo "Connecting to ${HOST}:${{ env.DB_PORT }} ..."
+          psql "host=${HOST} port=${{ env.DB_PORT }} user=${{ env.DB_USER }} dbname=${{ env.DB_NAME }} sslmode=require" -c "SELECT now();"
+
+      - name: Revoke allowlist (cleanup)
+        if: always()
+        run: |
+          while read -r SG; do
+            [ -z "$SG" ] && continue
+            echo "Revoking ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
+            aws ec2 revoke-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions IpProtocol=tcp,FromPort=${{ env.DB_PORT }},ToPort=${{ env.DB_PORT }},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32}]"
+          done < /tmp/sg_ids.txt

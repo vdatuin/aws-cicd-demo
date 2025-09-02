@@ -84,7 +84,6 @@ jobs:
   deploy_to_s3:
     needs: build_test_package
     runs-on: ubuntu-latest
-    environment: ${{ needs.build_test_package.outputs.envname }}
     permissions:
       id-token: write
       contents: read
@@ -97,7 +96,7 @@ jobs:
           name: local-build-artifacts
           path: out
 
-      # --- OIDC debug: print token claims (sub/aud) and current ref ---
+      # --- OIDC debug: show claims (should be ref:* now, not environment:*) ---
       - name: Inspect OIDC token claims
         uses: actions/github-script@v7
         with:
@@ -110,11 +109,10 @@ jobs:
               sub: payload.sub,
               repository: process.env.GITHUB_REPOSITORY,
               ref: process.env.GITHUB_REF,
-              sha: process.env.GITHUB_SHA,
               event_name: process.env.GITHUB_EVENT_NAME
             }, null, 2));
 
-      # --- Select role ARN based on env ---
+      # --- Select role ARN based on ref-derived env (dev/main|prod-*) ---
       - name: Select role ARN
         id: role
         shell: bash
@@ -126,7 +124,6 @@ jobs:
             echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Dev-Role' >> "$GITHUB_OUTPUT"
           fi
 
-      # --- Configure AWS (OIDC) ---
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:

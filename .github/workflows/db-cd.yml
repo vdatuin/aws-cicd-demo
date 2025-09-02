@@ -67,7 +67,7 @@ jobs:
       - name: Install clients
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq postgresql-client netcat-traditional python3
+          sudo apt-get install -y jq postgresql-client netcat-traditional python3 curl
 
       # --- Discover runner IP & RDS metadata ---
       - name: Discover runner IP
@@ -77,8 +77,9 @@ jobs:
       - name: Resolve RDS host & SGs
         id: meta
         run: |
-          DESC=$(aws rds describe-db-instances --db-instance-identifier "${{ steps.env.outputs.db_instance_id }}")
-          HOST=$(echo "$DESC" | jq -r '.DBInstances[0].Endpoint.Address')
+          set -euo pipefail
+          DESC="$(aws rds describe-db-instances --db-instance-identifier "${{ steps.env.outputs.db_instance_id }}")"
+          HOST="$(echo "$DESC" | jq -r '.DBInstances[0].Endpoint.Address')"
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "$DESC" | jq -r '.DBInstances[0].VpcSecurityGroups[].VpcSecurityGroupId' > /tmp/sg_ids.txt
           echo "Using RDS endpoint: $HOST"
@@ -131,10 +132,10 @@ jobs:
           set -euo pipefail
           H="${{ steps.meta.outputs.host }}"
           echo "Endpoint: $H"
-          python3 - <<'PY'
+          python3 - "$H" <<'PY'
 import socket, sys
 h = sys.argv[1]
-seen=set()
+seen = set()
 for fam,_,_,_,sa in socket.getaddrinfo(h, None):
     if fam == socket.AF_INET:
         seen.add(sa[0])
@@ -142,7 +143,6 @@ print("Resolved IPv4 addresses:")
 for a in sorted(seen):
     print(" -", a)
 PY
-          "$H"
 
       - name: Connectivity probes (nc + pg_isready)
         env:
@@ -153,7 +153,7 @@ PY
         run: |
           set -e
           echo "nc probe (5s timeout)…"
-          timeout 5 bash -lc 'nc -vz $HOST $PORT' || echo "nc timed out/refused"
+          timeout 5 bash -lc 'nc -vz "$HOST" "$PORT"' || echo "nc timed out/refused"
           echo "pg_isready…"
           pg_isready -h "$HOST" -p "$PORT" -U "$USER" -t 5 || echo "pg_isready did not report accepting yet"
 
@@ -164,11 +164,12 @@ PY
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
         run: |
+          set -e
           HOST=${{ steps.meta.outputs.host }}
           echo "Checking if database ${DB_NAME} exists on ${HOST}..."
-          psql -h "$HOST" -p $DB_PORT -U $DB_USER -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
+          psql -h "$HOST" -p "$DB_PORT" -U "$DB_USER" -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
             && echo "Database ${DB_NAME} already exists." \
-            || createdb -h "$HOST" -p $DB_PORT -U $DB_USER $DB_NAME
+            || createdb -h "$HOST" -p "$DB_PORT" -U "$DB_USER" "$DB_NAME"
 
       # --- Optional bootstrap role inside the DB ---
       - name: Ensure app_readonly role exists

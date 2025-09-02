@@ -1,4 +1,4 @@
-name: DB CD to AWS RDS (Liquibase via SSH tunnel)
+name: CD AWS RDS Postgres
 
 on:
   push:

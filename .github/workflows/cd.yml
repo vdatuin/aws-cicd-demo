@@ -97,6 +97,23 @@ jobs:
           name: local-build-artifacts
           path: out
 
+      # --- OIDC debug: print token claims (sub/aud) and current ref ---
+      - name: Inspect OIDC token claims
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            core.info(JSON.stringify({
+              iss: payload.iss,
+              aud: payload.aud,
+              sub: payload.sub,
+              repository: process.env.GITHUB_REPOSITORY,
+              ref: process.env.GITHUB_REF,
+              sha: process.env.GITHUB_SHA,
+              event_name: process.env.GITHUB_EVENT_NAME
+            }, null, 2));
+
       # --- Select role ARN based on env ---
       - name: Select role ARN
         id: role
@@ -122,13 +139,24 @@ jobs:
 
       - name: Compute S3 prefix (env/build-id)
         id: prefix
+        shell: bash
         run: |
+          set -euo pipefail
           echo "prefix=${{ needs.build_test_package.outputs.envname }}/${{ needs.build_test_package.outputs.build_id }}" >> "$GITHUB_OUTPUT"
+          echo "Using s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/"
+
+      - name: Ensure files exist
+        shell: bash
+        run: |
+          ls -l out || (echo "Missing 'out' directory"; exit 1)
+          ls -l out/dist || (echo "Missing built wheels in out/dist"; exit 1)
+          test -f out/coverage.xml || (echo "Missing coverage.xml"; exit 1)
 
       - name: Upload wheel(s) to S3
         run: aws s3 cp out/dist/ s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/ --recursive --exclude "*" --include "*.whl"
 
       - name: Upload run outputs (CSV/JSON/TXT)
+        shell: bash
         run: |
           if [ -d out/run_outputs ]; then
             aws s3 cp out/run_outputs/ s3://${{ env.BUCKET_NAME }}/${{ steps.prefix.outputs.prefix }}/run_outputs/ --recursive

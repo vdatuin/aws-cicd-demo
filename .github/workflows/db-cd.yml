@@ -8,8 +8,8 @@ on:
 
 env:
   AWS_REGION: ap-southeast-1
-  DB_USER: postgres             # change if you use a dedicated liquibase user
-  DB_NAME: appdb                # target database managed by Liquibase
+  DB_USER: postgres
+  DB_NAME: appdb
   DB_PORT: "5432"
 
 jobs:
@@ -67,7 +67,7 @@ jobs:
       - name: Install clients
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq postgresql-client
+          sudo apt-get install -y jq postgresql-client netcat-traditional python3
 
       # --- Discover runner IP & RDS metadata ---
       - name: Discover runner IP
@@ -86,15 +86,78 @@ jobs:
 
       # --- Temporarily allowlist the runner IP on port 5432 ---
       - name: Temporarily allowlist runner IP
+        shell: bash
         run: |
           while read -r SG; do
             [ -z "$SG" ] && continue
             echo "Authorizing ${SG} for ${{ steps.ip.outputs.ip }}/32 :${{ env.DB_PORT }}"
+            set +e
             aws ec2 authorize-security-group-ingress \
               --group-id "$SG" \
-              --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32,Description=GHA-${GITHUB_RUN_ID}}]" \
-              || echo "Ingress may already exist for ${SG} (continuing)."
+              --ip-permissions IpProtocol=tcp,FromPort=${DB_PORT},ToPort=${DB_PORT},IpRanges="[{CidrIp=${{ steps.ip.outputs.ip }}/32,Description=GHA-${GITHUB_RUN_ID}}]"
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              echo "Ingress added to $SG"
+            else
+              echo "Authorize returned rc=$rc (may already exist); continuing…"
+            fi
+            set -e
           done < /tmp/sg_ids.txt
+
+      # ===================== DEBUG BLOCK =====================
+
+      - name: Reconfirm runner public IP (dual sources)
+        id: ip2
+        run: |
+          set -euo pipefail
+          IP1="$(curl -s https://ifconfig.me || true)"
+          IP2="$(curl -s https://api.ipify.org || true)"
+          echo "ip_ifconfig=${IP1}" >> "$GITHUB_OUTPUT"
+          echo "ip_ipify=${IP2}" >> "$GITHUB_OUTPUT"
+          echo "Runner IPs: ifconfig.me=${IP1} ; ipify=${IP2}"
+
+      - name: Show inbound rules on RDS SGs
+        run: |
+          while read -r SG; do
+            [ -z "$SG" ] && continue
+            echo "---- $SG inbound rules ----"
+            aws ec2 describe-security-groups --group-ids "$SG" \
+              --query 'SecurityGroups[0].IpPermissions[].{From:FromPort,To:ToPort,CIDRs:IpRanges[*].CidrIp,Desc:IpRanges[*].Description,SrcSG:UserIdGroupPairs[*].GroupId}' \
+              --output table
+          done < /tmp/sg_ids.txt
+
+      - name: Resolve DB endpoint to A records
+        run: |
+          set -euo pipefail
+          H="${{ steps.meta.outputs.host }}"
+          echo "Endpoint: $H"
+          python3 - <<'PY'
+import socket, sys
+h = sys.argv[1]
+seen=set()
+for fam,_,_,_,sa in socket.getaddrinfo(h, None):
+    if fam == socket.AF_INET:
+        seen.add(sa[0])
+print("Resolved IPv4 addresses:")
+for a in sorted(seen):
+    print(" -", a)
+PY
+          "$H"
+
+      - name: Connectivity probes (nc + pg_isready)
+        env:
+          HOST: ${{ steps.meta.outputs.host }}
+          PORT: ${{ env.DB_PORT }}
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+          USER: ${{ env.DB_USER }}
+        run: |
+          set -e
+          echo "nc probe (5s timeout)…"
+          timeout 5 bash -lc 'nc -vz $HOST $PORT' || echo "nc timed out/refused"
+          echo "pg_isready…"
+          pg_isready -h "$HOST" -p "$PORT" -U "$USER" -t 5 || echo "pg_isready did not report accepting yet"
+
+      # =================== END DEBUG BLOCK ===================
 
       # --- Ensure the target DB exists (create if missing) ---
       - name: Ensure target DB exists

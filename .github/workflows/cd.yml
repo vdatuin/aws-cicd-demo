@@ -1,4 +1,4 @@
-name: CD to S3 (develop → dev, main/prod-* → prod)
+name: CD Python
 
 on:
   push:

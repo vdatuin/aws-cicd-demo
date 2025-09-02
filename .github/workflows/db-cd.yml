@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- Resolve environment (fixed) ---
+      # --- Resolve environment (dev/prod) ---
       - name: Resolve environment
         id: env
         shell: bash
@@ -32,11 +32,11 @@ jobs:
           case "$ref" in
             refs/heads/develop)
               echo "name=dev" >> "$GITHUB_OUTPUT"
-              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"     # <-- update to your DEV RDS identifier
+              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"
               ;;
             refs/heads/main|refs/tags/prod-*)
               echo "name=prod" >> "$GITHUB_OUTPUT"
-              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"    # <-- update to your PROD RDS identifier
+              echo "db_instance_id=cicddemo-1" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "Unsupported ref: $ref"
@@ -44,13 +44,25 @@ jobs:
               ;;
           esac
 
+      # --- Select role ARN based on env ---
+      - name: Select role ARN
+        id: role
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.env.outputs.name }}" = "prod" ]; then
+            echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Prod-Role' >> "$GITHUB_OUTPUT"
+          else
+            echo 'arn=arn:aws:iam::863813148945:role/GitHubActions-Dev-Role' >> "$GITHUB_OUTPUT"
+          fi
+
       # --- Assume the right AWS role via OIDC ---
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          # role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/GitHubActions-${{ steps.env.outputs.name }}-Role
-          role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
+          role-to-assume: ${{ steps.role.outputs.arn }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.job }}
 
       - name: Install clients
         run: |

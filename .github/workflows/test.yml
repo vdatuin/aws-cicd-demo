@@ -4,34 +4,34 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-s3:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write     # needed for OIDC to AWS
-      contents: read
-    env:
-      AWS_REGION: ap-southeast-1
-      S3_BUCKET: dxc-cicd-artifacts-bucket
-      S3_PREFIX: dev
-    steps:
-      - uses: actions/checkout@v4
+  # test-s3:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     id-token: write     # needed for OIDC to AWS
+  #     contents: read
+  #   env:
+  #     AWS_REGION: ap-southeast-1
+  #     S3_BUCKET: dxc-cicd-artifacts-bucket
+  #     S3_PREFIX: dev
+  #   steps:
+  #     - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
+  #     - name: Configure AWS credentials (OIDC)
+  #       uses: aws-actions/configure-aws-credentials@v4
+  #       with:
+  #         aws-region: ${{ env.AWS_REGION }}
+  #         role-to-assume: arn:aws:iam::863813148945:role/GitHubActions-Dev-Role
 
-      - name: Who am I (STS)
-        run: aws sts get-caller-identity
+  #     - name: Who am I (STS)
+  #       run: aws sts get-caller-identity
 
-      - name: Upload test file to S3
-        run: |
-          echo "Hello from GitHub OIDC at $(date -u)" > test.txt
-          aws s3 cp test.txt "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/test-connection.txt"
+  #     - name: Upload test file to S3
+  #       run: |
+  #         echo "Hello from GitHub OIDC at $(date -u)" > test.txt
+  #         aws s3 cp test.txt "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/test-connection.txt"
 
-      - name: List uploaded object
-        run: aws s3 ls "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/"
+  #     - name: List uploaded object
+  #       run: aws s3 ls "s3://${{ env.S3_BUCKET }}/${{ env.S3_PREFIX }}/"
 
   test-rds-public:
     runs-on: ubuntu-latest

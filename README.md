@@ -52,7 +52,7 @@ This project uses **GitHub Actions** to implement Continuous Integration (CI) an
 
 - **Trigger**: pull request to `develop` from feature branches
 - **Steps**:
-  - Start and Create Postgres 14 service in the job
+  - Creates a docker container using ubuntu vm and start Postgres 14 service
   - Create `appdb`, ensure `app_readonly` role
   - Run `liquibase validate` on `db/changelog/master.yaml`
   - Run `liquibase update` to apply to local Postgres

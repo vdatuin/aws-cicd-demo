@@ -13,6 +13,17 @@ def sample_retail_df() -> pd.DataFrame:
         "price":    [2.0,2.0,1.5,1.5,2.0,1.5],
     })
 
+    # New records (update)
+    # new_rows = pd.DataFrame({
+    #     "customer": ["Diana", "Eve", "Alice", "Bob"],
+    #     "product":  ["Oranges", "Bananas", "Apples", "Oranges"],
+    #     "quantity": [4, 3, 1, 2],
+    #     "price":    [2.2, 1.5, 2.0, 2.2],
+    # })
+
+    # Combine and return
+    # return pd.concat([base, new_rows], ignore_index=True)
+
 
 def run_demo(df: Optional[pd.DataFrame] = None, output_dir: str = "run_outputs") -> dict:
     """

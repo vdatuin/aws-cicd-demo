@@ -100,3 +100,42 @@ This project uses **GitHub Actions** to implement Continuous Integration (CI) an
 
 ### SonarCloud (Python CI)
 - `SONAR_TOKEN`
+
+# Project Folder Structure
+
+- **.github/workflows/** – GitHub Actions pipelines
+  - **ci-build.yml** – Python CI (checkout, install, flake8, pytest + coverage, SonarCloud)
+  - **cd.yml** – Python CD (build wheel, assume AWS role via OIDC, upload artifacts to S3)
+  - **db-ci.yml** – Database CI (start local Postgres, Liquibase validate/update for PRs)
+  - **db-cd.yml** – Database CD (SSH tunnel to bastion → RDS, Liquibase validate/update to dev/prod)
+  - **test.yml** – Optional/experimental workflow
+
+- **db/** – Database migrations managed by Liquibase
+  - **changelog/** – Organized changesets by domain
+    - **customer/** – Customer-related schema changes
+    - **orders/** – Orders-related schema changes
+    - **products/** – Product-related schema changes
+    - **procedures/** – SQL for stored procedures/functions
+    - **shared/** – Common objects (enums, extensions, utility tables)
+    - **master.yaml** – Root changelog that includes all the above
+  - **post_deploy/** – Optional SQL run after migrations (e.g., seed/minimal data)
+  - **liquibase.properties** – Default Liquibase CLI settings (URL, username, changelog file, etc.)
+
+- **src/** – Python application code
+  - **dq_utils/** – Reusable data-quality helpers/utilities
+  - **retail.py** – Demo/entry script that generates example outputs
+
+- **tests/** – Automated tests
+  - **test_dq_checks.py** – Unit tests for `dq_utils`
+  - **test_retail_integration.py** – Integration test for the demo flow
+
+- **Project config & docs**
+  - **.coveragerc** – `coverage.py` configuration (paths to include/omit, reporting)
+  - **README.md** – Project docs, CI/CD flow, how to run locally
+  - **pyproject.toml** – Python build system (e.g., setuptools) and tool configs used by `python -m build`
+  - **requirements.txt** – pip dependencies used in CI/CD and local dev
+  - **sonar-project.properties** – SonarCloud project settings (org/key, sources, coverage report path)
+
+
+---
+

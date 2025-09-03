@@ -52,8 +52,8 @@ This project uses **GitHub Actions** to implement Continuous Integration (CI) an
 
 - **Trigger**: pull request to `develop` from feature branches
 - **Steps**:
-  - Start Postgres 14 service in the job
-  - Create `cicddemodb`, ensure `app_readonly` role
+  - Start and Create Postgres 14 service in the job
+  - Create `appdb`, ensure `app_readonly` role
   - Run `liquibase validate` on `db/changelog/master.yaml`
   - Run `liquibase update` to apply to local Postgres
   - Run optional post-deploy SQL and smoke queries

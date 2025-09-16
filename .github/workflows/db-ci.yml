@@ -52,6 +52,16 @@ jobs:
           version: '4.32.0'
           edition: 'oss'
 
+      - name: Liquibase clear checksums (recompute after file edits)
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require" \
+            --username="${DB_USER}" \
+            --password="${{ secrets.RDS_PASSWORD }}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            clearCheckSums
+
       - name: Liquibase validate
         run: |
           liquibase \

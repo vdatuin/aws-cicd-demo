@@ -1,0 +1,235 @@
+name: DB Bootstrap Refresh (auto drop, local diff-changelog)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, prod]
+
+env:
+  # Target DB base; final name is cicddemodb (dev) or cicddemodb_prod (prod)
+  DB_NAME_BASE: cicddemodb
+  DB_USER: postgres
+  DB_PORT: "5432"
+
+  # RDS / bastion
+  RDS_HOST: cicddemo-1.cxtgit5qkldv.ap-southeast-1.rds.amazonaws.com
+  BASTION_HOST: "13.215.152.139"
+  BASTION_USER: "ec2-user"
+  LOCAL_DB_PORT: "65432"   # local tunnel port
+
+  # Local reference DB (service)
+  REF_DB_PORT: "5433"
+  REF_DB_USER: postgres
+  REF_DB_PASS: password
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      # NOTE: don't use ${{ env.* }} here; set literals
+      refdb:
+        image: postgres:14
+        ports: ["5433:5432"]   # <-- fixed literal
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: cicddemodb
+        options: >-
+          --health-cmd="pg_isready -U postgres -d cicddemodb"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target DB name
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.inputs.env }}" = "prod" ]; then
+            TARGET="${DB_NAME_BASE}_prod"
+          else
+            TARGET="${DB_NAME_BASE}"
+          fi
+          [ "$TARGET" = "postgres" ] && { echo "::error::Refusing to operate on 'postgres' database."; exit 1; }
+          echo "TARGET_DB_NAME=$TARGET" | tee -a "$GITHUB_ENV"
+          echo "Target DB: $TARGET"
+
+      - name: Install clients & tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client putty-tools openssh-client netcat-openbsd curl
+          psql --version
+          puttygen --help >/dev/null || true
+
+      - name: Prepare SSH key from PPK
+        env:
+          BASTION_PPK: ${{ secrets.BASTION_PPK }}
+        run: |
+          set -euo pipefail
+          test -n "$BASTION_PPK" || (echo "BASTION_PPK secret is empty"; exit 1)
+          printf "%s\n" "$BASTION_PPK" > cicddemo.ppk
+          chmod 600 cicddemo.ppk
+          puttygen cicddemo.ppk -O private-openssh -o cicddemo.pem
+          chmod 600 cicddemo.pem
+
+      - name: Open SSH tunnel
+        run: |
+          set -euo pipefail
+          ssh -i cicddemo.pem \
+              -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=15 \
+              -o ExitOnForwardFailure=yes \
+              -M -S /tmp/sshtunnel-${GITHUB_RUN_ID} \
+              -fnNT -L 127.0.0.1:${LOCAL_DB_PORT}:${RDS_HOST}:${DB_PORT} \
+              ${BASTION_USER}@${BASTION_HOST}
+          echo "Tunnel up."
+
+      - name: Setup Liquibase
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: '4.32.0'
+          edition: 'oss'
+
+      # Build the reference schema locally from your repo changelog
+      - name: Build reference schema (local)
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://localhost:${REF_DB_PORT}/${DB_NAME_BASE}" \
+            --username="${REF_DB_USER}" \
+            --password="${REF_DB_PASS}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update
+
+      # PRE-REFRESH DIFF (reference -> current RDS)
+      - name: Pre-refresh diff-changelog
+        id: pre
+        env:
+          RDS_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/bootstrap
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          PRE_YML="out/bootstrap/${{ github.ref_name }}-prediff-${TS}.yaml"
+          PRE_SQL="out/bootstrap/${{ github.ref_name }}-prediff-${TS}.sql"
+
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require" \
+            --username="${DB_USER}" \
+            --password="${RDS_PASSWORD}" \
+            --referenceUrl="jdbc:postgresql://localhost:${REF_DB_PORT}/${DB_NAME_BASE}" \
+            --referenceUsername="${REF_DB_USER}" \
+            --referencePassword="${REF_DB_PASS}" \
+            --diffTypes="tables,columns,indexes,foreignkeys,primarykeys,uniqueConstraints,sequences,views" \
+            --changeLogFile="${PRE_YML}" \
+            --log-level=info \
+            diff-changelog || true
+
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require" \
+            --username="${DB_USER}" \
+            --password="${RDS_PASSWORD}" \
+            --changeLogFile="${PRE_YML}" \
+            --log-level=info \
+            updateSQL > "${PRE_SQL}" || true
+
+          echo "prediff_yaml=${PRE_YML}" >> "$GITHUB_OUTPUT"
+          echo "prediff_sql=${PRE_SQL}"  >> "$GITHUB_OUTPUT"
+
+      - name: Upload pre-refresh diff
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-refresh-diff
+          path: |
+            ${{ steps.pre.outputs.prediff_yaml }}
+            ${{ steps.pre.outputs.prediff_sql }}
+
+      # DROP & RECREATE (no confirmation)
+      - name: Drop & recreate target DB
+        env:
+          PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+          PGSSLMODE: require
+        run: |
+          set -euo pipefail
+          DB="${TARGET_DB_NAME}"
+          echo "Terminate sessions on ${DB}…"
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB}' AND pid <> pg_backend_pid();"
+          echo "Drop database if exists (WITH FORCE)…"
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS ${DB} WITH (FORCE);"
+          echo "Create database ${DB}…"
+          createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB}"
+
+      - name: Apply repo changelog (fresh DB)
+        env:
+          RDS_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require" \
+            --username="${DB_USER}" \
+            --password="${RDS_PASSWORD}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            validate
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require" \
+            --username="${DB_USER}" \
+            --password="${RDS_PASSWORD}" \
+            --changeLogFile="db/changelog/master.yaml" \
+            --log-level=info \
+            update
+
+      # POST-REFRESH DIFF (should be empty)
+      - name: Post-refresh verification diff
+        id: post
+        env:
+          RDS_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/bootstrap
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          POST_YML="out/bootstrap/${{ github.ref_name }}-postdiff-${TS}.yaml"
+
+          liquibase \
+            --url="jdbc:postgresql://127.0.0.1:${LOCAL_DB_PORT}/${TARGET_DB_NAME}?sslmode=require" \
+            --username="${DB_USER}" \
+            --password="${RDS_PASSWORD}" \
+            --referenceUrl="jdbc:postgresql://localhost:${REF_DB_PORT}/${DB_NAME_BASE}" \
+            --referenceUsername="${REF_DB_USER}" \
+            --referencePassword="${REF_DB_PASS}" \
+            --changeLogFile="${POST_YML}" \
+            --log-level=info \
+            diff-changelog || true
+
+          echo "postdiff_yaml=${POST_YML}" >> "$GITHUB_OUTPUT"
+          if grep -q "changeSet:" "${POST_YML}"; then
+            echo "::error::Post-refresh diff contains changes. See ${POST_YML}"
+            exit 1
+          else
+            echo "Post-refresh verification OK (no diffs)."
+          fi
+
+      - name: Upload post-refresh diff
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-refresh-diff
+          path: ${{ steps.post.outputs.postdiff_yaml }}
+
+      - name: Close SSH tunnel
+        if: always()
+        run: |
+          ssh -S /tmp/sshtunnel-${GITHUB_RUN_ID} -O exit ${BASTION_USER}@${BASTION_HOST} || true

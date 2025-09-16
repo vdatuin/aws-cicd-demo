@@ -1,3 +1,4 @@
+--liquibase formatted sql
 --changeset vdatuin:vw-order-summary runOnChange:true labels:customer
 CREATE OR REPLACE VIEW public.vw_order_summary AS
 SELECT

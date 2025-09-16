@@ -1,7 +1,8 @@
 databaseChangeLog:
   - include: { file: shared/000-prereqs-and-extensions.sql, relativeToChangelogFile: true }
+  - include: { file: shared/001-roles.sql,                 relativeToChangelogFile: true }
 
-  # Base tables first (customers, orders, products, etc.)
+  # Base tables first
   - include: { file: customer/001-init-customer.sql,        relativeToChangelogFile: true }
   - include: { file: orders/001-init-orders.sql,            relativeToChangelogFile: true }
   - include: { file: orders/002-add-order-status.sql,       relativeToChangelogFile: true }
@@ -12,9 +13,8 @@ databaseChangeLog:
   - include: { file: products/002-insert-products.sql,      relativeToChangelogFile: true }
   - include: { file: products/003-fk-orders-product_sku.sql, relativeToChangelogFile: true }
 
-  # Now that orders exists, create views
+  # Views & grants (this is your file)
   - include: { file: customer/R-customer-views-and-grants.sql, relativeToChangelogFile: true }
   - include: { file: products/R-product-views-and-grants.sql,  relativeToChangelogFile: true }
 
-  # Procedures / cross-domain routines
   - include: { file: procedures/004-proc-recalc-customer-stats.sql, relativeToChangelogFile: true }

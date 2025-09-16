@@ -6,7 +6,7 @@ ON CONFLICT (customer_code) DO UPDATE
 SET customer_name = EXCLUDED.customer_name,
     email         = EXCLUDED.email;
 
--- Products: upsert and **refresh created_at** every run (Option A)
+-- Products: upsert and **refresh created_at** every run
 INSERT INTO products (product_sku, product_name, unit_price, is_active, created_at)
 VALUES
   ('SKU-001','Standard Widget',100.00,TRUE, NOW()),

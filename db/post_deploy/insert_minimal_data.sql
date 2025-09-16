@@ -6,7 +6,7 @@ ON CONFLICT (customer_code) DO UPDATE
 SET customer_name = EXCLUDED.customer_name,
     email         = EXCLUDED.email;
 
--- Products: upsert and **refresh created_at** every run
+-- Products: upsert and refresh created_at every run
 INSERT INTO products (product_sku, product_name, unit_price, is_active, created_at)
 VALUES
   ('SKU-001','Standard Widget',100.00,TRUE, NOW()),
@@ -15,14 +15,11 @@ ON CONFLICT (product_sku) DO UPDATE
 SET product_name = EXCLUDED.product_name,
     unit_price   = EXCLUDED.unit_price,
     is_active    = EXCLUDED.is_active,
-    created_at   = NOW();  -- refresh timestamp so it looks “today”
-
-/* If you haven’t yet, create a uniqueness constraint for idempotent order seeding:
-   CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_seed
-   ON orders (customer_id, order_date, product_sku);
-*/
+    created_at   = NOW();  -- refresh timestamp on every run
 
 -- Orders: upsert by (customer_id, order_date, product_sku)
+-- Requires UNIQUE(customer_id, order_date, product_sku)
+-- (created earlier as ux_orders_customer_date_sku)
 INSERT INTO orders (customer_id, order_date, product_sku, quantity, unit_price, status)
 SELECT c.customer_id, CURRENT_DATE - 5, 'SKU-001', 3, 100.00, 'PAID'
 FROM customers c

@@ -74,17 +74,31 @@ jobs:
           nc -vz -w 5 127.0.0.1 "${LOCAL_DB_PORT}" || echo "nc timed out/refused"
           pg_isready -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -t 5 || echo "pg_isready not ready yet"
 
-      - name: Ensure target DB exists
+      - name: Ensure target DB exists (and show before/after)
         env:
           PGPASSWORD: ${{ secrets.RDS_PASSWORD }}
+          PGSSLMODE: require
         run: |
-          set -e
+          set -euo pipefail
           DB="${TARGET_DB_NAME}"
-          echo "Ensuring database exists: ${DB}"
-          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres \
-               -tc "SELECT 1 FROM pg_database WHERE datname='${DB}'" | grep -q 1 \
-            && echo "Database ${DB} already exists." \
-            || createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB}"
+
+          echo "== Who/where =="
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres -tAc "SELECT current_user, inet_server_addr(), inet_server_port();"
+
+          echo "== DBs BEFORE =="
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres -lqt | awk '{print $1}' | sed '/^$/d'
+
+          echo "== Ensure ${DB} exists =="
+          if psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB}'" | grep -q '^1$'; then
+            echo "Database ${DB} already exists."
+          else
+            echo "Creating ${DB}…"
+            createdb -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" "${DB}"
+            echo "Created."
+          fi
+
+          echo "== DBs AFTER =="
+          psql -h 127.0.0.1 -p "${LOCAL_DB_PORT}" -U "${DB_USER}" -d postgres -lqt | awk '{print $1}' | sed '/^$/d'
 
       - name: Ensure app_readonly role exists
         env:

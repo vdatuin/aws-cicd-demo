@@ -1,5 +1,7 @@
+--liquibase formatted sql
+
 --changeset vdatuin:vw-order-summary runOnChange:true labels:customer
-CREATE OR REPLACE VIEW vw_order_summary AS
+CREATE OR REPLACE VIEW public.vw_order_summary AS
 SELECT
   o.order_id,
   c.customer_code,
@@ -14,6 +16,10 @@ FROM public.orders o
 JOIN public.customers c ON c.customer_id = o.customer_id;
 
 --changeset vdatuin:customer-grants runOnChange:true labels:customer
-GRANT SELECT ON customers TO app_readonly;
-GRANT SELECT ON orders TO app_readonly;
-GRANT SELECT ON vw_order_summary TO app_readonly;
+--preconditions onFail:HALT
+--precondition-sql-check expectedResult:1 SELECT 1 FROM pg_roles WHERE rolname='app_readonly';
+
+GRANT USAGE ON SCHEMA public TO app_readonly;
+GRANT SELECT ON TABLE public.customers        TO app_readonly;
+GRANT SELECT ON TABLE public.orders           TO app_readonly;
+GRANT SELECT ON public.vw_order_summary       TO app_readonly;

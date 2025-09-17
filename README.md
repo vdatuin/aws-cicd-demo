@@ -6,7 +6,7 @@ This project uses **GitHub Actions** to implement Continuous Integration (CI) an
 - **CD for Python** packages and publishes build artifacts to S3 on branch pushes.
 - **CD for Database** applies Liquibase migrations to AWS RDS on branch pushes.  
   - `develop` → Dev DB  
-  - `main` / `prod-*` → Prod DB
+  - `main` → Prod DB
 
 ---
 
